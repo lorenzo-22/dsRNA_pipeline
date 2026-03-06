@@ -1,7 +1,9 @@
 import json
 import sys
+import subprocess
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import httpx
 import pandas as pd
@@ -9,10 +11,12 @@ import typer
 from loguru import logger
 from tqdm import tqdm
 from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pymsaviz import MsaViz
 
-app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze their lengths.")
+app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze them (length, alignment).")
 
 # Configure loguru
 logger.remove()
@@ -38,7 +42,6 @@ def fetch_orthodb_data(endpoint: str, params: dict) -> Optional[dict]:
 def fetch_fasta(cluster_id: str, taxon: str, seq_type: str = "cds") -> Optional[str]:
     """Fetch FASTA sequences for a given cluster and taxon."""
     url = f"{ORTHODB_BASE_URL}/fasta"
-    # Note: OrthoDB uses 'id' for the cluster ID in the fasta endpoint
     params = {
         "id": cluster_id,
         "species": taxon,
@@ -76,14 +79,11 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
         return None
 
     # Pick the most relevant cluster that has the taxon in its ID if possible
-    # or just pick the first one from bigdata/data.
-    
     if search_data.get("bigdata"):
         for entry in search_data["bigdata"]:
             cluster_id = entry.get("id")
             if cluster_id and f"at{taxon}" in cluster_id:
                 return cluster_id
-        # If none matched specifically, pick the first from bigdata
         return search_data["bigdata"][0].get("id")
 
     # Fallback to the first ID in 'data'
@@ -109,7 +109,6 @@ def fetch_cds(
     if species_file and species_file.exists():
         try:
             species_df = pd.read_csv(species_file)
-            # Assume first column or column named 'Species'
             col = "Species" if "Species" in species_df.columns else species_df.columns[0]
             target_species = set(species_df[col].astype(str).str.strip().tolist())
             logger.info(f"Loaded {len(target_species)} target species for filtering.")
@@ -130,7 +129,6 @@ def fetch_cds(
                 parts = [s.strip() for s in line.split(",", 1)]
                 data.append(parts)
             else:
-                # Handle cases with no comma (ID only)
                 val = line.strip()
                 data.append([val, val])
         
@@ -161,7 +159,6 @@ def fetch_cds(
             # Filter sequences if target_species is set
             if target_species:
                 filtered_records = []
-                # OrthoDB format: >gene_id {"organism_name": "...", ...}\nSEQUENCE
                 parts = fasta_content.split(">")
                 for part in parts:
                     if not part.strip():
@@ -170,9 +167,7 @@ def fetch_cds(
                     lines = part.split("\n", 1)
                     header = lines[0]
                     
-                    # Extract organism_name from JSON-like header
                     try:
-                        # Find the first { and last }
                         start = header.find("{")
                         end = header.rfind("}")
                         if start != -1 and end != -1:
@@ -223,8 +218,6 @@ def plot_lengths(
 
     for fasta_file in tqdm(fasta_files, desc="Parsing FASTA files"):
         # Extract full sanitized gene name from filename 
-        # Filename format: {safe_name}_{gene_id}_{cluster_id}.fasta
-        # Use rsplit to avoid issues with underscores in the gene name itself
         parts = fasta_file.stem.rsplit("_", 2)
         gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
         
@@ -256,22 +249,18 @@ def plot_lengths(
     
     logger.info(f"Generating plots for {len(unique_genes)} genes...")
     
-    # 1. Plot length distribution per gene (showing organisms)
     for gene in tqdm(unique_genes, desc="Generating gene plots"):
         gene_df = df[df["Gene"] == gene]
-        
         plt.figure(figsize=(12, 6))
         sns.boxplot(data=gene_df, x="Organism", y="Length")
         plt.xticks(rotation=45, ha='right')
         plt.title(f"CDS Length Distribution for {gene}")
         plt.tight_layout()
-        
         out_path = plot_dir / f"{gene}_length_distribution.png"
         plt.savefig(out_path)
         plt.close()
         logger.debug(f"Saved plot: {out_path}")
 
-    # 2. Summary Plot: Average length per gene per organism
     logger.info("Generating summary comparison plot...")
     plt.figure(figsize=(14, 8))
     pivot_df = df.groupby(["Gene", "Organism"], observed=True)["Length"].mean().reset_index()
@@ -280,12 +269,135 @@ def plot_lengths(
     plt.title("Average CDS Length per Gene and Organism")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    
     summary_path = plot_dir / "summary_length_comparison.png"
     plt.savefig(summary_path)
     plt.close()
     logger.info(f"Saved summary plot: {summary_path}")
     logger.success("Plotting completed successfully.")
+
+
+@app.command()
+def align_sequences(
+    fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing filtered FASTA files."),
+    align_dir: Path = typer.Option(Path("output/alignments"), "--output", "-o", help="Directory to save alignments and plots."),
+    slurm: bool = typer.Option(True, help="Use SLURM to submit alignment jobs."),
+    cpus_per_task: int = typer.Option(4, help="CPUs per task for SLURM."),
+    mem: str = typer.Option("8G", help="Memory for SLURM job."),
+    time: str = typer.Option("02:00:00", help="Time limit for SLURM job."),
+):
+    """
+    Perform Multiple Sequence Alignment (MSA) using Clustal Omega and plot results.
+    Submits individual jobs to SLURM by default.
+    """
+    if not fasta_dir.exists():
+        logger.error(f"FASTA directory not found: {fasta_dir}")
+        raise typer.Exit(code=1)
+
+    align_dir.mkdir(parents=True, exist_ok=True)
+    
+    slurm_dir = align_dir / "slurm"
+    slurm_dir.mkdir(parents=True, exist_ok=True)
+
+    fasta_files = list(fasta_dir.glob("*.fasta"))
+    if not fasta_files:
+        logger.warning(f"No FASTA files found in {fasta_dir}")
+        return
+
+    logger.info(f"Preparing alignment for {len(fasta_files)} genes...")
+
+    for fasta_file in tqdm(fasta_files, desc="Processing genes"):
+        parts = fasta_file.stem.rsplit("_", 2)
+        gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
+        
+        # Prepare renamed FASTA for clustalo (uniqueness and better IDs)
+        try:
+            records = list(SeqIO.parse(fasta_file, "fasta"))
+            if len(records) < 2:
+                logger.warning(f"Skipping {gene_name}: less than 2 sequences.")
+                continue
+
+            temp_input = align_dir / f"{fasta_file.stem}_renamed.fasta"
+            aln_file = align_dir / f"{fasta_file.stem}_aligned.fasta"
+            plot_path = align_dir / f"{fasta_file.stem}_alignment.png"
+
+            renamed_records = []
+            for i, r in enumerate(records):
+                try:
+                    header = r.description
+                    start = header.find("{")
+                    end = header.rfind("}")
+                    if start != -1 and end != -1:
+                        meta = json.loads(header[start : end + 1])
+                        org_name = meta.get("organism_name", r.id).replace(" ", "_")
+                    else:
+                        org_name = r.id
+                except:
+                    org_name = r.id
+                new_id = f"{org_name}_{i}"
+                renamed_records.append(SeqRecord(r.seq, id=new_id, description=""))
+            SeqIO.write(renamed_records, temp_input, "fasta")
+
+            if slurm:
+                # Create SLURM script
+                job_script = slurm_dir / f"align_{fasta_file.stem}.sh"
+                job_name = f"msa_{gene_name[:10]}"
+                
+                # We need the full path to this script for the python call if we want to plot
+                script_path = Path(__file__).resolve()
+                
+                content = f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --output={slurm_dir}/{fasta_file.stem}.out
+#SBATCH --error={slurm_dir}/{fasta_file.stem}.err
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --mem={mem}
+#SBATCH --time={time}
+
+module load clustal-omega
+
+# Run Clustal Omega
+clustalo -i {temp_input.resolve()} -o {aln_file.resolve()} --force --outfmt=fasta --threads={cpus_per_task}
+
+# Run internal plot command (requires uv env)
+# We use the current python interpreter to run ourselves with a hidden 'internal-plot' command
+{sys.executable} {script_path} internal-plot {aln_file.resolve()} {plot_path.resolve()} "{gene_name}"
+"""
+                job_script.write_text(content)
+                
+                # Submit job
+                subprocess.run(["sbatch", str(job_script)], check=True)
+                logger.debug(f"Submitted SLURM job for {gene_name}")
+            else:
+                # Local execution (fallback)
+                logger.info(f"Running local alignment for {gene_name}...")
+                cmd = f"module load clustal-omega && clustalo -i {temp_input} -o {aln_file} --force --outfmt=fasta"
+                subprocess.run(["bash", "-c", cmd], check=True)
+                # Plot locally
+                try:
+                    mv = MsaViz(aln_file, format="fasta", show_consensus=True)
+                    mv.savefig(plot_path, dpi=300)
+                except Exception as e:
+                    logger.error(f"Error plotting {gene_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error processing {gene_name}: {e}")
+
+    if slurm:
+        logger.success(f"Successfully submitted {len(fasta_files)} SLURM jobs to {slurm_dir}")
+    else:
+        logger.success("Alignment completed successfully.")
+
+
+@app.command(hidden=True)
+def internal_plot(aln_file: Path, plot_path: Path, title: str):
+    """Hidden command for SLURM jobs to plot alignment."""
+    try:
+        mv = MsaViz(aln_file, format="fasta", show_consensus=True)
+        # Tweak figsize based on count if needed
+        mv.savefig(plot_path, dpi=300)
+    except Exception as e:
+        print(f"Error plotting {aln_file}: {e}")
+        sys.exit(1)
 
 
 def main():
