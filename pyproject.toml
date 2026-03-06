@@ -8,14 +8,16 @@ dependencies = [
     "biopython",
     "httpx",
     "loguru",
+    "matplotlib",
     "pandas",
     "requests",
+    "seaborn",
     "tqdm",
     "typer",
 ]
 
 [project.scripts]
-fetch-cds = "dsrna_worst_case_pipeline_v2.orthodb_fetch_cds:main"
+dsrna-pipeline = "dsrna_worst_case_pipeline_v2.orthodb_fetch_cds:main"
 
 [tool.uv]
 package = true

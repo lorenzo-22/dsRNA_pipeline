@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -7,8 +8,11 @@ import pandas as pd
 import typer
 from loguru import logger
 from tqdm import tqdm
+from Bio import SeqIO
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-app = typer.Typer(help="Fetch CDS sequences from OrthoDB for orthologs in a taxonomic group.")
+app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze their lengths.")
 
 # Configure loguru
 logger.remove()
@@ -94,7 +98,7 @@ def fetch_cds(
     taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t", help="NCBI Taxonomy ID for filtering (default: 6656 for Arthropoda)."),
 ):
     """
-    Main entry point to fetch CDS sequences for a list of genes.
+    Fetch CDS sequences for a list of genes.
     """
     if not input_file.exists():
         logger.error(f"Input file not found: {input_file}")
@@ -167,10 +171,8 @@ def fetch_cds(
                     
                     lines = part.split("\n", 1)
                     header = lines[0]
-                    sequence = lines[1] if len(lines) > 1 else ""
                     
                     # Extract organism_name from JSON-like header
-                    import json
                     try:
                         # Find the first { and last }
                         start = header.find("{")
@@ -196,6 +198,87 @@ def fetch_cds(
                 logger.warning(f"No sequences matched target species for cluster {cluster_id}")
         else:
             logger.warning(f"No FASTA content found for cluster {cluster_id}")
+
+
+@app.command()
+def plot_lengths(
+    fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing filtered FASTA files."),
+    plot_dir: Path = typer.Option(Path("output/plots"), "--output", "-o", help="Directory to save plots."),
+):
+    """
+    Plot CDS length distribution for each organism for each gene.
+    """
+    if not fasta_dir.exists():
+        logger.error(f"FASTA directory not found: {fasta_dir}")
+        raise typer.Exit(code=1)
+
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    fasta_files = list(fasta_dir.glob("*.fasta"))
+    if not fasta_files:
+        logger.warning(f"No FASTA files found in {fasta_dir}")
+        return
+
+    all_data = []
+
+    logger.info(f"Analyzing {len(fasta_files)} FASTA files...")
+
+    for fasta_file in fasta_files:
+        # Extract gene name from filename (format: GeneName_ID_Cluster.fasta)
+        gene_name = fasta_file.stem.split("_")[0]
+        
+        for record in SeqIO.parse(fasta_file, "fasta"):
+            # Extract metadata from JSON-like header
+            try:
+                header = record.description
+                start = header.find("{")
+                end = header.rfind("}")
+                if start != -1 and end != -1:
+                    meta = json.loads(header[start : end + 1])
+                    org_name = meta.get("organism_name", "Unknown")
+                    all_data.append({
+                        "Gene": gene_name,
+                        "Organism": org_name,
+                        "Length": len(record.seq),
+                        "File": fasta_file.name
+                    })
+            except Exception as e:
+                logger.debug(f"Could not parse header for {record.id}: {e}")
+
+    if not all_data:
+        logger.error("No valid sequence data found for plotting.")
+        return
+
+    df = pd.DataFrame(all_data)
+    
+    # 1. Plot length distribution per gene (showing organisms)
+    for gene in df["Gene"].unique():
+        gene_df = df[df["Gene"] == gene]
+        
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=gene_df, x="Organism", y="Length")
+        plt.xticks(rotation=45, ha='right')
+        plt.title(f"CDS Length Distribution for {gene}")
+        plt.tight_layout()
+        
+        out_path = plot_dir / f"{gene}_length_distribution.png"
+        plt.savefig(out_path)
+        plt.close()
+        logger.info(f"Saved plot: {out_path}")
+
+    # 2. Summary Plot: Average length per gene per organism
+    plt.figure(figsize=(14, 8))
+    pivot_df = df.groupby(["Gene", "Organism"])["Length"].mean().reset_index()
+    sns.barplot(data=pivot_df, x="Gene", y="Length", hue="Organism")
+    plt.xticks(rotation=45, ha='right')
+    plt.title("Average CDS Length per Gene and Organism")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    
+    summary_path = plot_dir / "summary_length_comparison.png"
+    plt.savefig(summary_path)
+    plt.close()
+    logger.info(f"Saved summary plot: {summary_path}")
 
 
 def main():
