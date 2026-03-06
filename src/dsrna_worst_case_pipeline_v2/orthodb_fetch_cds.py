@@ -2,11 +2,13 @@ import json
 import sys
 import subprocess
 import os
+import math
 from pathlib import Path
 from typing import Optional, List
 
 import httpx
 import pandas as pd
+import numpy as np
 import typer
 from loguru import logger
 from tqdm import tqdm
@@ -16,7 +18,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pymsaviz import MsaViz
 
-app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze them (length, alignment).")
+app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze them (length, alignment, information content).")
 
 # Configure loguru
 logger.remove()
@@ -61,24 +63,20 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
     """
     Find the OrthoDB cluster ID for a given gene ID or name at a specific taxonomic level.
     """
-    # Try searching by gene ID first (using 'query' parameter)
     logger.debug(f"Searching for gene ID: {gene_id}")
     search_data = fetch_orthodb_data("search", {"query": gene_id, "level": taxon})
     
     if not search_data or not search_data.get("data"):
-        # If not found, try searching by gene name
         logger.debug(f"Gene ID {gene_id} not found, searching for gene name: {gene_name}")
         search_data = fetch_orthodb_data("search", {"query": gene_name, "level": taxon})
 
     if not search_data or not search_data.get("data"):
-        # Last resort: search without level constraint
         logger.debug(f"Searching for gene name: {gene_name} without level constraint")
         search_data = fetch_orthodb_data("search", {"query": gene_name})
 
     if not search_data or not search_data.get("data"):
         return None
 
-    # Pick the most relevant cluster that has the taxon in its ID if possible
     if search_data.get("bigdata"):
         for entry in search_data["bigdata"]:
             cluster_id = entry.get("id")
@@ -86,8 +84,62 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
                 return cluster_id
         return search_data["bigdata"][0].get("id")
 
-    # Fallback to the first ID in 'data'
     return search_data["data"][0]
+
+
+def calculate_information_content(alignment_file: Path) -> pd.DataFrame:
+    """
+    Calculate Information Content (IC) using Shannon entropy and 
+    Schneider & Stephens small-sample correction.
+    """
+    records = list(SeqIO.parse(alignment_file, "fasta"))
+    if not records:
+        return pd.DataFrame()
+
+    aln_len = len(records[0].seq)
+    n_seq = len(records)
+    s = 4  # A, C, G, T
+    h_max = math.log2(s)
+    ln2 = math.log(2)
+
+    ic_results = []
+
+    for i in range(aln_len):
+        col = [str(r.seq[i]).upper() for r in records]
+        # Only count valid bases for entropy calculation
+        valid_bases = [b for b in col if b in 'ACGTU']
+        n = len(valid_bases)
+        
+        if n == 0:
+            ic_results.append({"Position": i + 1, "IC": 0.0, "GapFraction": 1.0})
+            continue
+
+        counts = {b: valid_bases.count(b) for b in 'ACGT'}
+        # Handle Uracil if present
+        if 'U' in valid_bases:
+            counts['T'] += valid_bases.count('U')
+
+        # Shannon Entropy H(l)
+        h_l = 0
+        for b in 'ACGT':
+            p = counts[b] / n
+            if p > 0:
+                h_l -= p * math.log2(p)
+
+        # Schneider & Stephens small-sample correction factor e(n)
+        e_n = (s - 1) / (2 * n * ln2)
+        
+        # Information Content R_seq(l) = H_max - (H(l) + e(n))
+        r_l = h_max - (h_l + e_n)
+        
+        # IC shouldn't be negative (can happen if correction factor is larger than H_max - H(l))
+        ic_results.append({
+            "Position": i + 1, 
+            "IC": max(0, r_l),
+            "GapFraction": (n_seq - n) / n_seq
+        })
+
+    return pd.DataFrame(ic_results)
 
 
 @app.command()
@@ -104,7 +156,6 @@ def fetch_cds(
         logger.error(f"Input file not found: {input_file}")
         raise typer.Exit(code=1)
 
-    # Load target species if provided
     target_species = None
     if species_file and species_file.exists():
         try:
@@ -117,7 +168,6 @@ def fetch_cds(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read the input file.
     data = []
     try:
         lines = input_file.read_text().splitlines()
@@ -144,29 +194,23 @@ def fetch_cds(
         gene_id = row["gene_id"]
         gene_name = row["gene_name"]
         
-        logger.info(f"Processing {gene_id} ({gene_name})")
         cluster_id = find_cluster_for_gene(gene_id, gene_name, taxon)
         
         if not cluster_id:
             logger.warning(f"Could not find cluster for {gene_id} ({gene_name})")
             continue
             
-        logger.info(f"Found cluster {cluster_id}. Fetching FASTA...")
-        
         fasta_content = fetch_fasta(cluster_id, taxon)
         
         if fasta_content and fasta_content.strip():
-            # Filter sequences if target_species is set
             if target_species:
                 filtered_records = []
                 parts = fasta_content.split(">")
                 for part in parts:
                     if not part.strip():
                         continue
-                    
                     lines = part.split("\n", 1)
                     header = lines[0]
-                    
                     try:
                         start = header.find("{")
                         end = header.rfind("}")
@@ -178,11 +222,9 @@ def fetch_cds(
                                 filtered_records.append(f">{part.strip()}")
                     except Exception as e:
                         logger.debug(f"Could not parse header metadata: {header} - {e}")
-                
                 fasta_content = "\n".join(filtered_records) + "\n" if filtered_records else ""
 
             if fasta_content.strip():
-                # Sanitize filename
                 safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in gene_name.replace(" ", "_"))
                 output_file = output_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
                 output_file.write_text(fasta_content)
@@ -217,14 +259,12 @@ def plot_lengths(
     logger.info(f"Analyzing {len(fasta_files)} FASTA files for length distribution...")
 
     for fasta_file in tqdm(fasta_files, desc="Parsing FASTA files"):
-        # Extract full sanitized gene name from filename 
         parts = fasta_file.stem.rsplit("_", 2)
         gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
         
         try:
             records = list(SeqIO.parse(fasta_file, "fasta"))
             for record in records:
-                # Extract metadata from JSON-like header
                 header = record.description
                 start = header.find("{")
                 end = header.rfind("}")
@@ -259,7 +299,6 @@ def plot_lengths(
         out_path = plot_dir / f"{gene}_length_distribution.png"
         plt.savefig(out_path)
         plt.close()
-        logger.debug(f"Saved plot: {out_path}")
 
     logger.info("Generating summary comparison plot...")
     plt.figure(figsize=(14, 8))
@@ -272,7 +311,6 @@ def plot_lengths(
     summary_path = plot_dir / "summary_length_comparison.png"
     plt.savefig(summary_path)
     plt.close()
-    logger.info(f"Saved summary plot: {summary_path}")
     logger.success("Plotting completed successfully.")
 
 
@@ -287,14 +325,12 @@ def align_sequences(
 ):
     """
     Perform Multiple Sequence Alignment (MSA) using Clustal Omega and plot results.
-    Submits individual jobs to SLURM by default.
     """
     if not fasta_dir.exists():
         logger.error(f"FASTA directory not found: {fasta_dir}")
         raise typer.Exit(code=1)
 
     align_dir.mkdir(parents=True, exist_ok=True)
-    
     slurm_dir = align_dir / "slurm"
     slurm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -309,7 +345,6 @@ def align_sequences(
         parts = fasta_file.stem.rsplit("_", 2)
         gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
         
-        # Prepare renamed FASTA for clustalo (uniqueness and better IDs)
         try:
             records = list(SeqIO.parse(fasta_file, "fasta"))
             if len(records) < 2:
@@ -319,6 +354,8 @@ def align_sequences(
             temp_input = align_dir / f"{fasta_file.stem}_renamed.fasta"
             aln_file = align_dir / f"{fasta_file.stem}_aligned.fasta"
             plot_path = align_dir / f"{fasta_file.stem}_alignment.png"
+            ic_plot_path = align_dir / f"{fasta_file.stem}_information_content.png"
+            ic_csv_path = align_dir / f"{fasta_file.stem}_information_content.csv"
 
             renamed_records = []
             for i, r in enumerate(records):
@@ -338,11 +375,8 @@ def align_sequences(
             SeqIO.write(renamed_records, temp_input, "fasta")
 
             if slurm:
-                # Create SLURM script
                 job_script = slurm_dir / f"align_{fasta_file.stem}.sh"
                 job_name = f"msa_{gene_name[:10]}"
-                
-                # We need the full path to this script for the python call if we want to plot
                 script_path = Path(__file__).resolve()
                 
                 content = f"""#!/bin/bash
@@ -355,48 +389,50 @@ def align_sequences(
 
 module load clustal-omega
 
-# Run Clustal Omega
 clustalo -i {temp_input.resolve()} -o {aln_file.resolve()} --force --outfmt=fasta --threads={cpus_per_task}
 
-# Run internal plot command (requires uv env)
-# We use the current python interpreter to run ourselves with a hidden 'internal-plot' command
-{sys.executable} {script_path} internal-plot {aln_file.resolve()} {plot_path.resolve()} "{gene_name}"
+{sys.executable} {script_path} internal-plot {aln_file.resolve()} {plot_path.resolve()} {ic_plot_path.resolve()} {ic_csv_path.resolve()} "{gene_name}"
 """
                 job_script.write_text(content)
-                
-                # Submit job
                 subprocess.run(["sbatch", str(job_script)], check=True)
-                logger.debug(f"Submitted SLURM job for {gene_name}")
             else:
-                # Local execution (fallback)
-                logger.info(f"Running local alignment for {gene_name}...")
-                cmd = f"module load clustal-omega && clustalo -i {temp_input} -o {aln_file} --force --outfmt=fasta"
-                subprocess.run(["bash", "-c", cmd], check=True)
-                # Plot locally
-                try:
-                    mv = MsaViz(aln_file, format="fasta", show_consensus=True)
-                    mv.savefig(plot_path, dpi=300)
-                except Exception as e:
-                    logger.error(f"Error plotting {gene_name}: {e}")
+                subprocess.run(["bash", "-c", f"module load clustal-omega && clustalo -i {temp_input} -o {aln_file} --force --outfmt=fasta"], check=True)
+                internal_plot(aln_file, plot_path, ic_plot_path, ic_csv_path, gene_name)
 
         except Exception as e:
             logger.error(f"Error processing {gene_name}: {e}")
 
     if slurm:
-        logger.success(f"Successfully submitted {len(fasta_files)} SLURM jobs to {slurm_dir}")
-    else:
-        logger.success("Alignment completed successfully.")
+        logger.success(f"Successfully submitted {len(fasta_files)} SLURM jobs.")
 
 
 @app.command(hidden=True)
-def internal_plot(aln_file: Path, plot_path: Path, title: str):
-    """Hidden command for SLURM jobs to plot alignment."""
+def internal_plot(aln_file: Path, plot_path: Path, ic_plot_path: Path, ic_csv_path: Path, title: str):
+    """Hidden command for SLURM jobs to plot alignment and information content."""
     try:
+        # Plot alignment
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
-        # Tweak figsize based on count if needed
         mv.savefig(plot_path, dpi=300)
+
+        # Calculate Information Content
+        ic_df = calculate_information_content(aln_file)
+        if not ic_df.empty:
+            ic_df.to_csv(ic_csv_path, index=False)
+            
+            # Plot Information Content
+            plt.figure(figsize=(15, 5))
+            plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4)
+            plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
+            plt.ylim(0, 2.1)
+            plt.xlabel("Position")
+            plt.ylabel("Information Content (bits)")
+            plt.title(f"Information Content for {title} (Schneider & Stephens Correction)")
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(ic_plot_path, dpi=300)
+            plt.close()
     except Exception as e:
-        print(f"Error plotting {aln_file}: {e}")
+        print(f"Error in internal-plot for {aln_file}: {e}")
         sys.exit(1)
 
 
