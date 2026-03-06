@@ -206,7 +206,7 @@ def plot_lengths(
     plot_dir: Path = typer.Option(Path("output/plots"), "--output", "-o", help="Directory to save plots."),
 ):
     """
-    Plot CDS length distribution for each organism for each gene.
+    Generate CDS length distribution plots for each organism and gene.
     """
     if not fasta_dir.exists():
         logger.error(f"FASTA directory not found: {fasta_dir}")
@@ -221,15 +221,16 @@ def plot_lengths(
 
     all_data = []
 
-    logger.info(f"Analyzing {len(fasta_files)} FASTA files...")
+    logger.info(f"Analyzing {len(fasta_files)} FASTA files for length distribution...")
 
-    for fasta_file in fasta_files:
+    for fasta_file in tqdm(fasta_files, desc="Parsing FASTA files"):
         # Extract gene name from filename (format: GeneName_ID_Cluster.fasta)
         gene_name = fasta_file.stem.split("_")[0]
         
-        for record in SeqIO.parse(fasta_file, "fasta"):
-            # Extract metadata from JSON-like header
-            try:
+        try:
+            records = list(SeqIO.parse(fasta_file, "fasta"))
+            for record in records:
+                # Extract metadata from JSON-like header
                 header = record.description
                 start = header.find("{")
                 end = header.rfind("}")
@@ -242,17 +243,20 @@ def plot_lengths(
                         "Length": len(record.seq),
                         "File": fasta_file.name
                     })
-            except Exception as e:
-                logger.debug(f"Could not parse header for {record.id}: {e}")
+        except Exception as e:
+            logger.error(f"Error parsing {fasta_file.name}: {e}")
 
     if not all_data:
         logger.error("No valid sequence data found for plotting.")
         return
 
     df = pd.DataFrame(all_data)
+    unique_genes = df["Gene"].unique()
+    
+    logger.info(f"Generating plots for {len(unique_genes)} genes...")
     
     # 1. Plot length distribution per gene (showing organisms)
-    for gene in df["Gene"].unique():
+    for gene in tqdm(unique_genes, desc="Generating gene plots"):
         gene_df = df[df["Gene"] == gene]
         
         plt.figure(figsize=(12, 6))
@@ -264,11 +268,12 @@ def plot_lengths(
         out_path = plot_dir / f"{gene}_length_distribution.png"
         plt.savefig(out_path)
         plt.close()
-        logger.info(f"Saved plot: {out_path}")
+        logger.debug(f"Saved plot: {out_path}")
 
     # 2. Summary Plot: Average length per gene per organism
+    logger.info("Generating summary comparison plot...")
     plt.figure(figsize=(14, 8))
-    pivot_df = df.groupby(["Gene", "Organism"])["Length"].mean().reset_index()
+    pivot_df = df.groupby(["Gene", "Organism"], observed=True)["Length"].mean().reset_index()
     sns.barplot(data=pivot_df, x="Gene", y="Length", hue="Organism")
     plt.xticks(rotation=45, ha='right')
     plt.title("Average CDS Length per Gene and Organism")
@@ -279,6 +284,7 @@ def plot_lengths(
     plt.savefig(summary_path)
     plt.close()
     logger.info(f"Saved summary plot: {summary_path}")
+    logger.success("Plotting completed successfully.")
 
 
 def main():
