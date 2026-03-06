@@ -222,8 +222,11 @@ def plot_lengths(
     logger.info(f"Analyzing {len(fasta_files)} FASTA files for length distribution...")
 
     for fasta_file in tqdm(fasta_files, desc="Parsing FASTA files"):
-        # Extract gene name from filename (format: GeneName_ID_Cluster.fasta)
-        gene_name = fasta_file.stem.split("_")[0]
+        # Extract full sanitized gene name from filename 
+        # Filename format: {safe_name}_{gene_id}_{cluster_id}.fasta
+        # Use rsplit to avoid issues with underscores in the gene name itself
+        parts = fasta_file.stem.rsplit("_", 2)
+        gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
         
         try:
             records = list(SeqIO.parse(fasta_file, "fasta"))
