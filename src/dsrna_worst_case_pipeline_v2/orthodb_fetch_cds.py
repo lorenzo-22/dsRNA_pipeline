@@ -90,6 +90,7 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
 def fetch_cds(
     input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i", help="Input file with gene IDs and names (CSV/TXT)."),
     output_dir: Path = typer.Option(Path("output/orthologs"), "--output", "-o", help="Output directory for FASTA files."),
+    species_file: Optional[Path] = typer.Option(Path("input/insects_list.csv"), "--species-list", "-s", help="Optional CSV file with species to keep."),
     taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t", help="NCBI Taxonomy ID for filtering (default: 6656 for Arthropoda)."),
 ):
     """
@@ -98,6 +99,18 @@ def fetch_cds(
     if not input_file.exists():
         logger.error(f"Input file not found: {input_file}")
         raise typer.Exit(code=1)
+
+    # Load target species if provided
+    target_species = None
+    if species_file and species_file.exists():
+        try:
+            species_df = pd.read_csv(species_file)
+            # Assume first column or column named 'Species'
+            col = "Species" if "Species" in species_df.columns else species_df.columns[0]
+            target_species = set(species_df[col].astype(str).str.strip().tolist())
+            logger.info(f"Loaded {len(target_species)} target species for filtering.")
+        except Exception as e:
+            logger.error(f"Error reading species list: {e}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -143,11 +156,44 @@ def fetch_cds(
         fasta_content = fetch_fasta(cluster_id, taxon)
         
         if fasta_content and fasta_content.strip():
-            # Sanitize filename
-            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in gene_name.replace(" ", "_"))
-            output_file = output_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
-            output_file.write_text(fasta_content)
-            logger.info(f"Saved {len(fasta_content)} bytes to {output_file}")
+            # Filter sequences if target_species is set
+            if target_species:
+                filtered_records = []
+                # OrthoDB format: >gene_id {"organism_name": "...", ...}\nSEQUENCE
+                parts = fasta_content.split(">")
+                for part in parts:
+                    if not part.strip():
+                        continue
+                    
+                    lines = part.split("\n", 1)
+                    header = lines[0]
+                    sequence = lines[1] if len(lines) > 1 else ""
+                    
+                    # Extract organism_name from JSON-like header
+                    import json
+                    try:
+                        # Find the first { and last }
+                        start = header.find("{")
+                        end = header.rfind("}")
+                        if start != -1 and end != -1:
+                            meta_str = header[start : end + 1]
+                            meta = json.loads(meta_str)
+                            org_name = meta.get("organism_name", "").strip()
+                            if org_name in target_species:
+                                filtered_records.append(f">{part.strip()}")
+                    except Exception as e:
+                        logger.debug(f"Could not parse header metadata: {header} - {e}")
+                
+                fasta_content = "\n".join(filtered_records) + "\n" if filtered_records else ""
+
+            if fasta_content.strip():
+                # Sanitize filename
+                safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in gene_name.replace(" ", "_"))
+                output_file = output_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
+                output_file.write_text(fasta_content)
+                logger.info(f"Saved {len(fasta_content)} bytes to {output_file}")
+            else:
+                logger.warning(f"No sequences matched target species for cluster {cluster_id}")
         else:
             logger.warning(f"No FASTA content found for cluster {cluster_id}")
 
