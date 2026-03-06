@@ -1,0 +1,21 @@
+[project]
+name = "dsrna-worst-case-pipeline-v2"
+version = "0.1.0"
+description = "Pipeline to fetch OrthoDB CDS for siRNA worst-case analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "biopython",
+    "httpx",
+    "loguru",
+    "pandas",
+    "requests",
+    "tqdm",
+    "typer",
+]
+
+[project.scripts]
+fetch-cds = "dsrna_worst_case_pipeline_v2.orthodb_fetch_cds:main"
+
+[tool.uv]
+package = true

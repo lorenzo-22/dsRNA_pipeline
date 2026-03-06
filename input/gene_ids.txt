@@ -1,0 +1,35 @@
+TC015612,Acetyl-CoA carboxylase  
+TC000069,Proteasome subunit beta type-1
+TC000144,Proteasome subunit alpha type-6
+TC006641,Coatomer subunit beta
+TC001574,Signal recognition particle 54 kDa
+TC004425,Heat shock 70 kDa cognate 3
+TC005185,Polyadenylate-binding protein 1
+TC006553,Snakeskin
+TC006375,26S proteasome non-ATPase regulatory subunit 7
+TC006492,26S proteasome regulatory subunit 7
+TC007891,26S proteasome non-ATPase regulatory subunit 8
+TC007999,26S proteasome regulatory subunit 6B
+TC008617,Proteasome subunit beta type-4
+TC009191,transport Sec23A
+TC009491,RNA binding 15
+TC006075,26S proteasome regulatory subunit 4
+TC009965,Ras-related Rab-1A
+TC010031,DNA-directed RNA polymerases I, II, and III subunit RPABC1
+TC010318,Bifunctional 3-phosphoadenosine 5-phosphosulfate synthase (PAPS synthase)
+TC010321,26S proteasome regulatory subunit 10B
+TC010519,ATP-binding cassette sub-family E member 1
+TG011058,Dynamin
+TG011120,ROP
+TG011287,60S ribosomal protein L23A
+TG013303,Eukaryotic translation initiation factor 3 subunit A (eIF3a)
+TG013782,Glycine-tRNA ligase
+TG014413,ATP-dependent RNA helicase WM6
+TG014725,Prolactin regulatory element-binding protein
+TG015014,Clathrin heavy chain
+TG015035,Proteasome subunit beta type-3
+TG015539,40S ribosomal S3a
+TG031132,Pre-mRNA-splicing factor SF1
+TG033036,26S proteasome non-ATPase regulatory subunit 1
+TG034312,Splicing factor 3B subunit 1
+TG034766,Tubulin beta-3 chain
