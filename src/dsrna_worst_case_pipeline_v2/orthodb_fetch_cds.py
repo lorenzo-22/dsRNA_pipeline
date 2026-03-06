@@ -87,10 +87,11 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
     return search_data["data"][0]
 
 
-def calculate_information_content(alignment_file: Path) -> pd.DataFrame:
+def calculate_information_content(alignment_file: Path, reference_id: Optional[str] = None) -> pd.DataFrame:
     """
     Calculate Information Content (IC) using Shannon entropy and 
     Schneider & Stephens small-sample correction.
+    If reference_id is provided, maps IC to reference coordinates.
     """
     records = list(SeqIO.parse(alignment_file, "fasta"))
     if not records:
@@ -102,20 +103,42 @@ def calculate_information_content(alignment_file: Path) -> pd.DataFrame:
     h_max = math.log2(s)
     ln2 = math.log(2)
 
+    # Find reference sequence if requested
+    ref_seq = None
+    if reference_id:
+        for r in records:
+            if reference_id in r.id:
+                ref_seq = str(r.seq)
+                break
+
     ic_results = []
+    ref_pos = 0
 
     for i in range(aln_len):
         col = [str(r.seq[i]).upper() for r in records]
+        
+        # Track reference position
+        is_ref_gap = False
+        if ref_seq:
+            if ref_seq[i] != '-':
+                ref_pos += 1
+            else:
+                is_ref_gap = True
+
         # Only count valid bases for entropy calculation
         valid_bases = [b for b in col if b in 'ACGTU']
         n = len(valid_bases)
         
         if n == 0:
-            ic_results.append({"Position": i + 1, "IC": 0.0, "GapFraction": 1.0})
+            ic_results.append({
+                "Position": i + 1, 
+                "ReferencePosition": ref_pos if not is_ref_gap else None,
+                "IC": 0.0, 
+                "GapFraction": 1.0
+            })
             continue
 
         counts = {b: valid_bases.count(b) for b in 'ACGT'}
-        # Handle Uracil if present
         if 'U' in valid_bases:
             counts['T'] += valid_bases.count('U')
 
@@ -132,9 +155,9 @@ def calculate_information_content(alignment_file: Path) -> pd.DataFrame:
         # Information Content R_seq(l) = H_max - (H(l) + e(n))
         r_l = h_max - (h_l + e_n)
         
-        # IC shouldn't be negative (can happen if correction factor is larger than H_max - H(l))
         ic_results.append({
             "Position": i + 1, 
+            "ReferencePosition": ref_pos if not is_ref_gap else None,
             "IC": max(0, r_l),
             "GapFraction": (n_seq - n) / n_seq
         })
@@ -147,6 +170,7 @@ def fetch_cds(
     input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i", help="Input file with gene IDs and names (CSV/TXT)."),
     output_dir: Path = typer.Option(Path("output/orthologs"), "--output", "-o", help="Output directory for FASTA files."),
     species_file: Optional[Path] = typer.Option(Path("input/insects_list.csv"), "--species-list", "-s", help="Optional CSV file with species to keep."),
+    reference_organism: Optional[str] = typer.Option("Tribolium castaneum", "--reference", "-r", help="Always keep this organism if found."),
     taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t", help="NCBI Taxonomy ID for filtering (default: 6656 for Arthropoda)."),
 ):
     """
@@ -156,7 +180,7 @@ def fetch_cds(
         logger.error(f"Input file not found: {input_file}")
         raise typer.Exit(code=1)
 
-    target_species = None
+    target_species = set()
     if species_file and species_file.exists():
         try:
             species_df = pd.read_csv(species_file)
@@ -165,6 +189,10 @@ def fetch_cds(
             logger.info(f"Loaded {len(target_species)} target species for filtering.")
         except Exception as e:
             logger.error(f"Error reading species list: {e}")
+
+    # Ensure reference is in the allowed list
+    if reference_organism:
+        target_species.add(reference_organism)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -318,6 +346,7 @@ def plot_lengths(
 def align_sequences(
     fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing filtered FASTA files."),
     align_dir: Path = typer.Option(Path("output/alignments"), "--output", "-o", help="Directory to save alignments and plots."),
+    reference_organism: Optional[str] = typer.Option("Tribolium castaneum", "--reference", "-r", help="Name of the reference organism."),
     slurm: bool = typer.Option(True, help="Use SLURM to submit alignment jobs."),
     cpus_per_task: int = typer.Option(4, help="CPUs per task for SLURM."),
     mem: str = typer.Option("8G", help="Memory for SLURM job."),
@@ -325,6 +354,7 @@ def align_sequences(
 ):
     """
     Perform Multiple Sequence Alignment (MSA) using Clustal Omega and plot results.
+    One sequence is designated as reference for coordinate mapping.
     """
     if not fasta_dir.exists():
         logger.error(f"FASTA directory not found: {fasta_dir}")
@@ -357,27 +387,53 @@ def align_sequences(
             ic_plot_path = align_dir / f"{fasta_file.stem}_information_content.png"
             ic_csv_path = align_dir / f"{fasta_file.stem}_information_content.csv"
 
+            # Rename sequences and find reference
             renamed_records = []
+            ref_id = None
+            
+            # First pass: find reference and pick the longest if multiple exist
+            ref_candidates = []
             for i, r in enumerate(records):
+                org_name = "Unknown"
                 try:
-                    header = r.description
-                    start = header.find("{")
-                    end = header.rfind("}")
-                    if start != -1 and end != -1:
-                        meta = json.loads(header[start : end + 1])
-                        org_name = meta.get("organism_name", r.id).replace(" ", "_")
-                    else:
-                        org_name = r.id
+                    meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
+                    org_name = meta.get("organism_name", "Unknown")
+                except:
+                    pass
+                
+                if reference_organism and reference_organism.lower() in org_name.lower():
+                    ref_candidates.append((len(r.seq), i, r, org_name))
+            
+            actual_ref_idx = -1
+            if ref_candidates:
+                ref_candidates.sort(key=lambda x: x[0], reverse=True)
+                actual_ref_idx = ref_candidates[0][1]
+                ref_org_name = ref_candidates[0][3]
+                logger.debug(f"Reference for {gene_name}: {ref_org_name}")
+
+            for i, r in enumerate(records):
+                org_name = "Unknown"
+                try:
+                    meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
+                    org_name = meta.get("organism_name", "Unknown").replace(" ", "_")
                 except:
                     org_name = r.id
+                
                 new_id = f"{org_name}_{i}"
-                renamed_records.append(SeqRecord(r.seq, id=new_id, description=""))
+                if i == actual_ref_idx:
+                    ref_id = new_id
+                    # Move reference to the front of the list
+                    renamed_records.insert(0, SeqRecord(r.seq, id=new_id, description=""))
+                else:
+                    renamed_records.append(SeqRecord(r.seq, id=new_id, description=""))
+            
             SeqIO.write(renamed_records, temp_input, "fasta")
 
             if slurm:
                 job_script = slurm_dir / f"align_{fasta_file.stem}.sh"
                 job_name = f"msa_{gene_name[:10]}"
                 script_path = Path(__file__).resolve()
+                ref_arg = f'--reference-id "{ref_id}"' if ref_id else ""
                 
                 content = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -391,13 +447,13 @@ module load clustal-omega
 
 clustalo -i {temp_input.resolve()} -o {aln_file.resolve()} --force --outfmt=fasta --threads={cpus_per_task}
 
-{sys.executable} {script_path} internal-plot {aln_file.resolve()} {plot_path.resolve()} {ic_plot_path.resolve()} {ic_csv_path.resolve()} "{gene_name}"
+{sys.executable} {script_path} internal-plot {aln_file.resolve()} {plot_path.resolve()} {ic_plot_path.resolve()} {ic_csv_path.resolve()} "{gene_name}" {ref_arg}
 """
                 job_script.write_text(content)
                 subprocess.run(["sbatch", str(job_script)], check=True)
             else:
                 subprocess.run(["bash", "-c", f"module load clustal-omega && clustalo -i {temp_input} -o {aln_file} --force --outfmt=fasta"], check=True)
-                internal_plot(aln_file, plot_path, ic_plot_path, ic_csv_path, gene_name)
+                internal_plot(aln_file, plot_path, ic_plot_path, ic_csv_path, gene_name, ref_id)
 
         except Exception as e:
             logger.error(f"Error processing {gene_name}: {e}")
@@ -407,7 +463,14 @@ clustalo -i {temp_input.resolve()} -o {aln_file.resolve()} --force --outfmt=fast
 
 
 @app.command(hidden=True)
-def internal_plot(aln_file: Path, plot_path: Path, ic_plot_path: Path, ic_csv_path: Path, title: str):
+def internal_plot(
+    aln_file: Path, 
+    plot_path: Path, 
+    ic_plot_path: Path, 
+    ic_csv_path: Path, 
+    title: str, 
+    reference_id: Optional[str] = typer.Option(None)
+):
     """Hidden command for SLURM jobs to plot alignment and information content."""
     try:
         # Plot alignment
@@ -415,16 +478,23 @@ def internal_plot(aln_file: Path, plot_path: Path, ic_plot_path: Path, ic_csv_pa
         mv.savefig(plot_path, dpi=300)
 
         # Calculate Information Content
-        ic_df = calculate_information_content(aln_file)
+        ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
             ic_df.to_csv(ic_csv_path, index=False)
             
             # Plot Information Content
             plt.figure(figsize=(15, 5))
+            
+            # If reference is provided, we can mark ref positions on X axis
+            # For simplicity, we plot against alignment position but note the reference
             plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4)
             plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
+            
             plt.ylim(0, 2.1)
-            plt.xlabel("Position")
+            plt.xlabel("Alignment Position")
+            if reference_id:
+                plt.xlabel(f"Alignment Position (Reference: {reference_id})")
+            
             plt.ylabel("Information Content (bits)")
             plt.title(f"Information Content for {title} (Schneider & Stephens Correction)")
             plt.grid(axis='y', linestyle='--', alpha=0.7)
