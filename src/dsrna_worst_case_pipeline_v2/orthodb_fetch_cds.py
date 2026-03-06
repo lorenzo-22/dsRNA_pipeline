@@ -119,28 +119,26 @@ def fetch_cds(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Read the input file.
+    data = []
     try:
-        # Load all columns, we only care about the first two.
-        df = pd.read_csv(input_file, header=None)
-        if df.shape[1] >= 2:
-            df.columns = ["gene_id", "gene_name"] + list(df.columns[2:])
-        else:
-            df.columns = ["gene_id"]
-            df["gene_name"] = df["gene_id"]
-            
-        df["gene_id"] = df["gene_id"].astype(str).str.strip()
-        df["gene_name"] = df["gene_name"].astype(str).str.strip()
-    except Exception as e:
-        logger.error(f"Error reading input file with pandas: {e}")
-        # Fallback to simple line reading
         lines = input_file.read_text().splitlines()
-        data = []
         for line in lines:
+            line = line.strip()
+            if not line:
+                continue
             if "," in line:
-                data.append([s.strip() for s in line.split(",", 1)])
+                parts = [s.strip() for s in line.split(",", 1)]
+                data.append(parts)
             else:
-                data.append([line.strip(), line.strip()])
+                # Handle cases with no comma (ID only)
+                val = line.strip()
+                data.append([val, val])
+        
         df = pd.DataFrame(data, columns=["gene_id", "gene_name"])
+        logger.info(f"Loaded {len(df)} genes from {input_file.name}")
+    except Exception as e:
+        logger.error(f"Error reading input file: {e}")
+        raise typer.Exit(code=1)
 
     logger.info(f"Processing {len(df)} genes...")
 
