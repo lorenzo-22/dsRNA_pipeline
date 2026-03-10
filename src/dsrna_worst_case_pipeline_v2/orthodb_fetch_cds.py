@@ -28,6 +28,12 @@ ORTHODB_BASE_URL = "https://data.orthodb.org/current"
 DEFAULT_TAXON = "6656"  # Arthropoda
 
 
+def get_gene_name(fasta_stem: str) -> str:
+    """Consistently extract gene name from filename stem."""
+    parts = fasta_stem.rsplit("_", 2)
+    return parts[0] if len(parts) == 3 else fasta_stem
+
+
 def fetch_orthodb_data(endpoint: str, params: dict) -> Optional[dict]:
     """Helper to fetch data from OrthoDB REST API."""
     url = f"{ORTHODB_BASE_URL}/{endpoint}"
@@ -91,7 +97,6 @@ def calculate_information_content(alignment_file: Path, reference_id: Optional[s
     """
     Calculate Information Content (IC) using Shannon entropy and 
     Schneider & Stephens small-sample correction.
-    If reference_id is provided, maps IC to reference coordinates.
     """
     records = list(SeqIO.parse(alignment_file, "fasta"))
     if not records:
@@ -168,33 +173,40 @@ def calculate_information_content(alignment_file: Path, reference_id: Optional[s
 @app.command()
 def fetch_cds(
     input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i", help="Input file with gene IDs and names (CSV/TXT)."),
-    output_dir: Path = typer.Option(Path("output/orthologs"), "--output", "-o", help="Output directory for FASTA files."),
+    output_dir: Path = typer.Option(Path("output"), "--output", "-o", help="Base output directory."),
     species_file: Optional[Path] = typer.Option(Path("input/insects_list.csv"), "--species-list", "-s", help="Optional CSV file with species to keep."),
     reference_organism: Optional[str] = typer.Option("Tribolium castaneum", "--reference", "-r", help="Always keep this organism if found."),
     taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t", help="NCBI Taxonomy ID for filtering (default: 6656 for Arthropoda)."),
 ):
     """
-    Fetch CDS sequences for a list of genes.
+    Fetch CDS sequences for a list of genes and prepare folder structure.
     """
     if not input_file.exists():
         logger.error(f"Input file not found: {input_file}")
         raise typer.Exit(code=1)
+
+    orthologs_dir = output_dir / "orthologs"
+    orthologs_dir.mkdir(parents=True, exist_ok=True)
 
     target_species = set()
     if species_file and species_file.exists():
         try:
             species_df = pd.read_csv(species_file)
             col = "Species" if "Species" in species_df.columns else species_df.columns[0]
-            target_species = set(species_df[col].astype(str).str.strip().tolist())
+            species_list = species_df[col].astype(str).str.strip().tolist()
+            target_species = set(species_list)
             logger.info(f"Loaded {len(target_species)} target species for filtering.")
+            
+            # Create organism folders
+            for org in species_list:
+                (output_dir / org.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Error reading species list: {e}")
 
     # Ensure reference is in the allowed list
     if reference_organism:
         target_species.add(reference_organism)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / reference_organism.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
 
     data = []
     try:
@@ -223,13 +235,11 @@ def fetch_cds(
         gene_name = row["gene_name"]
         
         cluster_id = find_cluster_for_gene(gene_id, gene_name, taxon)
-        
         if not cluster_id:
             logger.warning(f"Could not find cluster for {gene_id} ({gene_name})")
             continue
             
         fasta_content = fetch_fasta(cluster_id, taxon)
-        
         if fasta_content and fasta_content.strip():
             if target_species:
                 filtered_records = []
@@ -254,7 +264,7 @@ def fetch_cds(
 
             if fasta_content.strip():
                 safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in gene_name.replace(" ", "_"))
-                output_file = output_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
+                output_file = orthologs_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
                 output_file.write_text(fasta_content)
                 logger.info(f"Saved {len(fasta_content)} bytes to {output_file}")
             else:
@@ -266,7 +276,7 @@ def fetch_cds(
 @app.command()
 def plot_lengths(
     fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing filtered FASTA files."),
-    plot_dir: Path = typer.Option(Path("output/plots"), "--output", "-o", help="Directory to save plots."),
+    output_base: Path = typer.Option(Path("output"), "--output", "-o", help="Base output directory."),
 ):
     """
     Generate CDS length distribution plots for each organism and gene.
@@ -275,7 +285,9 @@ def plot_lengths(
         logger.error(f"FASTA directory not found: {fasta_dir}")
         raise typer.Exit(code=1)
 
-    plot_dir.mkdir(parents=True, exist_ok=True)
+    msa_base = output_base / "msa"
+    summary_dir = output_base / "summary_plots"
+    summary_dir.mkdir(parents=True, exist_ok=True)
 
     fasta_files = list(fasta_dir.glob("*.fasta"))
     if not fasta_files:
@@ -283,13 +295,10 @@ def plot_lengths(
         return
 
     all_data = []
-
     logger.info(f"Analyzing {len(fasta_files)} FASTA files for length distribution...")
 
     for fasta_file in tqdm(fasta_files, desc="Parsing FASTA files"):
-        parts = fasta_file.stem.rsplit("_", 2)
-        gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
-        
+        gene_name = get_gene_name(fasta_file.stem)
         try:
             records = list(SeqIO.parse(fasta_file, "fasta"))
             for record in records:
@@ -316,15 +325,17 @@ def plot_lengths(
     unique_genes = df["Gene"].unique()
     
     logger.info(f"Generating plots for {len(unique_genes)} genes...")
-    
     for gene in tqdm(unique_genes, desc="Generating gene plots"):
         gene_df = df[df["Gene"] == gene]
+        gene_dir = msa_base / gene
+        gene_dir.mkdir(parents=True, exist_ok=True)
+        
         plt.figure(figsize=(12, 6))
         sns.boxplot(data=gene_df, x="Organism", y="Length")
         plt.xticks(rotation=45, ha='right')
         plt.title(f"CDS Length Distribution for {gene}")
         plt.tight_layout()
-        out_path = plot_dir / f"{gene}_length_distribution.png"
+        out_path = gene_dir / "length_distribution.png"
         plt.savefig(out_path)
         plt.close()
 
@@ -336,7 +347,7 @@ def plot_lengths(
     plt.title("Average CDS Length per Gene and Organism")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    summary_path = plot_dir / "summary_length_comparison.png"
+    summary_path = summary_dir / "summary_length_comparison.png"
     plt.savefig(summary_path)
     plt.close()
     logger.success("Plotting completed successfully.")
@@ -345,7 +356,7 @@ def plot_lengths(
 @app.command()
 def align_sequences(
     fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing filtered FASTA files."),
-    align_dir: Path = typer.Option(Path("output/alignments"), "--output", "-o", help="Directory to save alignments and plots."),
+    output_base: Path = typer.Option(Path("output"), "--output", "-o", help="Base output directory."),
     reference_organism: Optional[str] = typer.Option("Tribolium castaneum", "--reference", "-r", help="Name of the reference organism."),
     slurm: bool = typer.Option(True, help="Use SLURM to submit alignment jobs."),
     cpus_per_task: int = typer.Option(4, help="CPUs per task for SLURM."),
@@ -354,15 +365,13 @@ def align_sequences(
 ):
     """
     Perform Multiple Sequence Alignment (MSA) using Clustal Omega and plot results.
-    One sequence is designated as reference for coordinate mapping.
     """
     if not fasta_dir.exists():
         logger.error(f"FASTA directory not found: {fasta_dir}")
         raise typer.Exit(code=1)
 
-    align_dir.mkdir(parents=True, exist_ok=True)
-    slurm_dir = align_dir / "slurm"
-    slurm_dir.mkdir(parents=True, exist_ok=True)
+    msa_base = output_base / "msa"
+    msa_base.mkdir(parents=True, exist_ok=True)
 
     fasta_files = list(fasta_dir.glob("*.fasta"))
     if not fasta_files:
@@ -372,8 +381,12 @@ def align_sequences(
     logger.info(f"Preparing alignment for {len(fasta_files)} genes...")
 
     for fasta_file in tqdm(fasta_files, desc="Processing genes"):
-        parts = fasta_file.stem.rsplit("_", 2)
-        gene_name = parts[0] if len(parts) == 3 else fasta_file.stem
+        gene_name = get_gene_name(fasta_file.stem)
+        gene_dir = msa_base / gene_name
+        gene_dir.mkdir(parents=True, exist_ok=True)
+        
+        slurm_dir = gene_dir / "slurm"
+        slurm_dir.mkdir(parents=True, exist_ok=True)
         
         try:
             records = list(SeqIO.parse(fasta_file, "fasta"))
@@ -381,17 +394,16 @@ def align_sequences(
                 logger.warning(f"Skipping {gene_name}: less than 2 sequences.")
                 continue
 
-            temp_input = align_dir / f"{fasta_file.stem}_renamed.fasta"
-            aln_file = align_dir / f"{fasta_file.stem}_aligned.fasta"
-            plot_path = align_dir / f"{fasta_file.stem}_alignment.png"
-            ic_plot_path = align_dir / f"{fasta_file.stem}_information_content.png"
-            ic_csv_path = align_dir / f"{fasta_file.stem}_information_content.csv"
+            temp_input = gene_dir / "renamed_orthologs.fasta"
+            aln_file = gene_dir / "aligned.fasta"
+            plot_path = gene_dir / "alignment.png"
+            ic_plot_path = gene_dir / "information_content.png"
+            ic_csv_path = gene_dir / "information_content.csv"
 
             # Rename sequences and find reference
             renamed_records = []
             ref_id = None
             
-            # First pass: find reference and pick the longest if multiple exist
             ref_candidates = []
             for i, r in enumerate(records):
                 org_name = "Unknown"
@@ -400,7 +412,6 @@ def align_sequences(
                     org_name = meta.get("organism_name", "Unknown")
                 except:
                     pass
-                
                 if reference_organism and reference_organism.lower() in org_name.lower():
                     ref_candidates.append((len(r.seq), i, r, org_name))
             
@@ -408,8 +419,6 @@ def align_sequences(
             if ref_candidates:
                 ref_candidates.sort(key=lambda x: x[0], reverse=True)
                 actual_ref_idx = ref_candidates[0][1]
-                ref_org_name = ref_candidates[0][3]
-                logger.debug(f"Reference for {gene_name}: {ref_org_name}")
 
             for i, r in enumerate(records):
                 org_name = "Unknown"
@@ -422,7 +431,6 @@ def align_sequences(
                 new_id = f"{org_name}_{i}"
                 if i == actual_ref_idx:
                     ref_id = new_id
-                    # Move reference to the front of the list
                     renamed_records.insert(0, SeqRecord(r.seq, id=new_id, description=""))
                 else:
                     renamed_records.append(SeqRecord(r.seq, id=new_id, description=""))
@@ -437,8 +445,8 @@ def align_sequences(
                 
                 content = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
-#SBATCH --output={slurm_dir}/{fasta_file.stem}.out
-#SBATCH --error={slurm_dir}/{fasta_file.stem}.err
+#SBATCH --output={slurm_dir}/job.out
+#SBATCH --error={slurm_dir}/job.err
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem={mem}
 #SBATCH --time={time}
@@ -453,7 +461,14 @@ clustalo -i {temp_input.resolve()} -o {aln_file.resolve()} --force --outfmt=fast
                 subprocess.run(["sbatch", str(job_script)], check=True)
             else:
                 subprocess.run(["bash", "-c", f"module load clustal-omega && clustalo -i {temp_input} -o {aln_file} --force --outfmt=fasta"], check=True)
-                internal_plot(aln_file, plot_path, ic_plot_path, ic_csv_path, gene_name, ref_id)
+                # Plot locally
+                try:
+                    mv = MsaViz(aln_file, format="fasta", show_consensus=True)
+                    fig = mv.plotfig()
+                    fig.suptitle(f"Multiple Sequence Alignment: {gene_name}", fontsize=16)
+                    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+                except Exception as e:
+                    logger.error(f"Error plotting {gene_name}: {e}")
 
         except Exception as e:
             logger.error(f"Error processing {gene_name}: {e}")
@@ -475,26 +490,21 @@ def internal_plot(
     try:
         # Plot alignment
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
-        mv.savefig(plot_path, dpi=300)
+        fig = mv.plotfig()
+        fig.suptitle(f"Multiple Sequence Alignment: {title}", fontsize=16)
+        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
 
         # Calculate Information Content
         ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
             ic_df.to_csv(ic_csv_path, index=False)
             
-            # Plot Information Content
             plt.figure(figsize=(15, 5))
-            
-            # If reference is provided, we can mark ref positions on X axis
-            # For simplicity, we plot against alignment position but note the reference
             plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4)
             plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
             
             plt.ylim(0, 2.1)
-            plt.xlabel("Alignment Position")
-            if reference_id:
-                plt.xlabel(f"Alignment Position (Reference: {reference_id})")
-            
+            plt.xlabel(f"Alignment Position{' (Reference: ' + reference_id + ')' if reference_id else ''}")
             plt.ylabel("Information Content (bits)")
             plt.title(f"Information Content for {title} (Schneider & Stephens Correction)")
             plt.grid(axis='y', linestyle='--', alpha=0.7)
