@@ -188,6 +188,9 @@ def fetch_cds(
     orthologs_dir = output_dir / "orthologs"
     orthologs_dir.mkdir(parents=True, exist_ok=True)
 
+    organisms_base = output_dir / "Organisms"
+    organisms_base.mkdir(parents=True, exist_ok=True)
+
     target_species = set()
     if species_file and species_file.exists():
         try:
@@ -197,16 +200,16 @@ def fetch_cds(
             target_species = set(species_list)
             logger.info(f"Loaded {len(target_species)} target species for filtering.")
             
-            # Create organism folders
+            # Create organism folders inside Organisms/
             for org in species_list:
-                (output_dir / org.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
+                (organisms_base / org.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Error reading species list: {e}")
 
     # Ensure reference is in the allowed list
     if reference_organism:
         target_species.add(reference_organism)
-        (output_dir / reference_organism.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
+        (organisms_base / reference_organism.replace(" ", "_")).mkdir(parents=True, exist_ok=True)
 
     data = []
     try:
