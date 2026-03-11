@@ -127,13 +127,22 @@ def run_vienna_accessibility(sequence: str, window_size: int = 150, max_span: in
         return np.zeros(len(sequence))
     try:
         seq_len = len(sequence)
+        # Use T->U for ViennaRNA
+        rna_seq = sequence.replace("T", "U").replace("t", "u")
         w = min(window_size, seq_len)
         l = min(max_span, seq_len)
-        probs_matrix = RNA.pfl_fold_up(sequence, 1, w, l)
+        
+        # RNA.pfl_fold_up returns a SWIG object that behaves like a 2D array
+        probs_matrix = RNA.pfl_fold_up(rna_seq, 1, w, l)
+        
+        # Result matrix is 1-based indexing for position
         acc = np.zeros(seq_len)
         for i in range(1, seq_len + 1):
-            if i < len(probs_matrix) and 1 < len(probs_matrix[i]):
+            try:
+                # probs_matrix[i][1] is probability for length 1 at position i
                 acc[i-1] = probs_matrix[i][1]
+            except (IndexError, TypeError):
+                acc[i-1] = 0.0
         return acc
     except Exception as e:
         logger.error(f"Error calculating accessibility: {e}")
@@ -341,29 +350,30 @@ def internal_pairwise_run(fasta_file: Path, ref_tmp: Path, g_dir: Path, referenc
     metrics, anchored_recs = [], []
     ref_rec = list(SeqIO.parse(ref_tmp, "fasta"))[0]
     anchored_recs.append(SeqRecord(ref_rec.seq, id=f"REF_{reference_organism.replace(' ', '_')}", description=""))
-    for r in recs:
+    for i, r in enumerate(recs):
         org_name = json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "Unknown")
         if org_name.lower() == reference_organism.lower(): continue
-        q_tmp = g_dir / "fasta" / f"temp_{org_name.replace(' ', '_')}.fasta"
+        q_tmp = g_dir / "fasta" / f"temp_{org_name.replace(' ', '_')}_{i}.fasta"
         SeqIO.write(r, q_tmp, "fasta")
-        out_n = g_dir / "needle" / f"{org_name.replace(' ', '_')}_vs_ref.needle"
-        subprocess.run(["needle", "-asequence", str(ref_tmp), "-bsequence", str(q_tmp), "-outfile", str(out_n), "-datafile", "EDNAFULL", "-gapopen", 10, "-gapextend", 0.5], check=True, capture_output=True)
+        out_n = g_dir / "needle" / f"{org_name.replace(' ', '_')}_{i}_vs_ref.needle"
+        subprocess.run(["needle", "-asequence", str(ref_tmp), "-bsequence", str(q_tmp), "-outfile", str(out_n), "-datafile", "EDNAFULL", "-gapopen", "10", "-gapextend", "0.5"], check=True, capture_output=True)
         metrics.append({**parse_needle_output(out_n), "Organism": org_name})
         ref_anch, que_anch = get_anchored_sequences(out_n)
-        if que_anch: anchored_recs.append(SeqRecord(Seq(que_anch), id=org_name.replace(' ', '_'), description=""))
+        if que_anch: anchored_recs.append(SeqRecord(Seq(que_anch), id=f"{org_name.replace(' ', '_')}_{i}", description=""))
         q_tmp.unlink()
     if metrics:
         pd.DataFrame(metrics).to_csv(g_dir / "pairwise_metrics.csv", index=False)
         plt.figure(figsize=(10, 6)); sns.barplot(data=pd.DataFrame(metrics).melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
         plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics: {gene_name}"); plt.ylabel("Percentage (%)")
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300); plt.close()
+        plt.tight_layout(rect=[0, 0.03, 1, 0.90]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300); plt.close()
     if len(anchored_recs) > 1:
         a_fa = g_dir / "fasta" / "anchored_alignment.fasta"
         SeqIO.write(anchored_recs, a_fa, "fasta")
         try:
             mv = MsaViz(a_fa, format="fasta", show_consensus=True)
             fig = mv.plotfig(); fig.suptitle(f"Reference-Anchored Alignment: {gene_name}\n(Gaps in reference removed)", fontsize=14)
-            fig.tight_layout(rect=[0, 0.03, 1, 0.95]); fig.savefig(g_dir / "plots" / "anchored_alignment.png", dpi=300); plt.close(fig)
+            fig.subplots_adjust(top=0.85)
+            fig.savefig(g_dir / "plots" / "anchored_alignment.png", dpi=300, bbox_inches="tight"); plt.close(fig)
         except Exception as e: print(f"Error plotting anchored: {e}")
 
 
@@ -373,16 +383,16 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
     ref_rec = list(SeqIO.parse(ref_tmp, "fasta"))[0]
     ref_acc = run_vienna_accessibility(str(ref_rec.seq))
     window_data = []
-    for r in recs:
+    for i, r in enumerate(recs):
         org_name = json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "Unknown")
         if org_name.lower() == reference_organism.lower(): continue
-        needle_file = pw_dir / "needle" / f"{org_name.replace(' ', '_')}_vs_ref.needle"
+        needle_file = pw_dir / "needle" / f"{org_name.replace(' ', '_')}_{i}_vs_ref.needle"
         if not needle_file.exists(): continue
         aln = AlignIO.read(needle_file, "emboss")
         ref_aln, que_aln = str(aln[0].seq), str(aln[1].seq)
         que_acc = run_vienna_accessibility(str(r.seq))
-        ref_to_col = [i for i, b in enumerate(ref_aln) if b != '-']
-        que_to_col = [i for i, b in enumerate(que_aln) if b != '-']
+        ref_to_col = [idx for idx, b in enumerate(ref_aln) if b != '-']
+        que_to_col = [idx for idx, b in enumerate(que_aln) if b != '-']
         col_to_que_acc = {col: que_acc[q_idx] for q_idx, col in enumerate(que_to_col)}
         results = []
         for start_ref in range(len(ref_to_col) - 299):
@@ -396,13 +406,35 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
             results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc})
         window_data.append(pd.DataFrame(results))
     if window_data:
-        avg_df = pd.concat(window_data).groupby("RefPos").mean().reset_index()
+        # Concatenate all window data
+        full_win_df = pd.concat(window_data)
+        avg_df = full_win_df.groupby("RefPos").mean().reset_index()
         avg_df.to_csv(acc_dir / "data" / "windowed_analysis.csv", index=False)
-        plt.figure(figsize=(12, 5)); ref_win_acc = [np.mean(ref_acc[i:i+300]) for i in range(len(ref_acc)-299)]
-        plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2)
-        plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", alpha=0.7)
-        plt.title(f"Windowed Accessibility (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
-        plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300); plt.close()
+        
+        # 1. Accessibility Plot
+        plt.figure(figsize=(12, 6))
+        
+        # Plot individual NTO accessibilities (stored in window_data)
+        # Using a small alpha to show density without cluttering
+        for i, df in enumerate(window_data):
+            label = "Other Organisms" if i == 0 else None
+            plt.plot(df["RefPos"], df["NTO_Acc"], color="blue", alpha=0.1, lw=1, label=label)
+            
+        # Plot Reference
+        ref_win_acc = [np.mean(ref_acc[idx:idx+300]) for idx in range(len(ref_acc)-299)]
+        plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2.5)
+        
+        # Plot Average NTO
+        plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", lw=2, linestyle="--")
+        
+        plt.title(f"Windowed Accessibility (300nt): {gene_name}")
+        plt.xlabel("Reference Nucleotide Position")
+        plt.ylabel("Probability Unpaired")
+        plt.legend(loc="upper right")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300)
+        plt.close()
         plt.figure(figsize=(12, 5)); plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
         plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6)
         plt.title(f"Windowed Conservation (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Score")
@@ -414,14 +446,14 @@ def internal_msa_plot(aln_file: Path, plot_path: Path, ic_plot: Path, ic_csv: Pa
     try:
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
         fig = mv.plotfig(); fig.suptitle(f"Multiple Sequence Alignment: {title}", fontsize=16)
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95]); fig.savefig(plot_path, dpi=300); plt.close(fig)
+        fig.subplots_adjust(top=0.85); fig.savefig(plot_path, dpi=300, bbox_inches="tight"); plt.close(fig)
         ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
             ic_df.to_csv(ic_csv, index=False); plt.figure(figsize=(15, 5))
             plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4); plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
             plt.ylim(0, 2.1); ref_name = reference_id.rsplit('_', 1)[0].replace('_', ' ') if reference_id else ""
             plt.xlabel(f"Alignment Position{' (Ref: ' + ref_name + ')' if ref_name else ''}"); plt.ylabel("Information Content (bits)"); plt.title(f"Information Content: {title}")
-            plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(ic_plot, dpi=300); plt.close()
+            plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(rect=[0, 0.03, 1, 0.90]); plt.savefig(ic_plot, dpi=300); plt.close()
     except Exception as e: print(f"Error: {e}"); sys.exit(1)
 
 def main(): app()
