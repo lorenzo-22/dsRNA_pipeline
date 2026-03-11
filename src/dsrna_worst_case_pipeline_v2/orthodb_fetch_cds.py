@@ -410,7 +410,7 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
             ident = sum(1 for a, b in zip(win_ref_aln, win_que_aln) if a == b and a != '-') / span
             win_ic = np.mean([calculate_column_ic([ref_aln[c], que_aln[c]]) for c in range(start_col, end_col+1)])
             win_q_acc = sum(col_to_que_acc.get(c, 0.0) for c in range(start_col, end_col+1)) / span
-            results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc})
+            results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc, "Organism": org_name})
         window_data.append(pd.DataFrame(results))
     if window_data:
         # Concatenate all window data
@@ -421,11 +421,11 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
         # 1. Accessibility Plot
         plt.figure(figsize=(12, 6))
         
-        # Plot individual NTO accessibilities (stored in window_data)
-        # Using a small alpha to show density without cluttering
-        for i, df in enumerate(window_data):
-            label = "Other Organisms" if i == 0 else None
-            plt.plot(df["RefPos"], df["NTO_Acc"], color="blue", alpha=0.1, lw=1, label=label)
+        # Plot individual NTO accessibilities with distinct colors
+        colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
+        for i, (df, color) in enumerate(zip(window_data, colors)):
+            org_label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
+            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.3, lw=1, label=org_label)
             
         # Plot Reference
         ref_win_acc = [np.mean(ref_acc[idx:idx+300]) for idx in range(len(ref_acc)-299)]
@@ -437,10 +437,10 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
         plt.title(f"Windowed Accessibility (300nt): {gene_name}")
         plt.xlabel("Reference Nucleotide Position")
         plt.ylabel("Probability Unpaired")
-        plt.legend(loc="upper right")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
         plt.grid(alpha=0.3)
         plt.tight_layout()
-        plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300)
+        plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300, bbox_inches="tight")
         plt.close()
         plt.figure(figsize=(12, 5)); plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
         plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6)
