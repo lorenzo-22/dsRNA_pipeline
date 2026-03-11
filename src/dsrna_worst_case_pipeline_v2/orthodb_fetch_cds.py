@@ -13,14 +13,23 @@ import numpy as np
 import typer
 from loguru import logger
 from tqdm import tqdm
-from Bio import SeqIO
+from Bio import SeqIO, AlignIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+import matplotlib
+matplotlib.use('Agg') # Force headless mode
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pymsaviz import MsaViz
 
-app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze them (length, MSA, reference-anchored pairwise alignment).")
+# Try to import ViennaRNA
+try:
+    import RNA
+    HAS_VIENNA = True
+except ImportError:
+    HAS_VIENNA = False
+
+app = typer.Typer(help="Fetch CDS sequences from OrthoDB and analyze them (length, MSA, reference-anchored pairwise analysis).")
 
 # Configure loguru
 logger.remove()
@@ -84,181 +93,160 @@ def find_cluster_for_gene(gene_id: str, gene_name: str, taxon: str) -> Optional[
 def parse_needle_output(needle_file: Path) -> Dict:
     """Parse similarity, identity and gaps from EMBOSS Needle output."""
     stats = {"Identity": 0.0, "Similarity": 0.0, "Gaps": 0.0}
-    if not needle_file.exists():
-        return stats
-    
+    if not needle_file.exists(): return stats
     content = needle_file.read_text()
-    # Regex to find percentages in EMBOSS format: (75.0%)
     id_match = re.search(r"Identity:\s+\d+/\d+\s+\((\d+\.\d+)%\)", content)
     sim_match = re.search(r"Similarity:\s+\d+/\d+\s+\((\d+\.\d+)%\)", content)
     gap_match = re.search(r"Gaps:\s+\d+/\d+\s+\((\d+\.\d+)%\)", content)
-    
     if id_match: stats["Identity"] = float(id_match.group(1))
     if sim_match: stats["Similarity"] = float(sim_match.group(1))
     if gap_match: stats["Gaps"] = float(gap_match.group(1))
-    
     return stats
 
 
 def get_anchored_sequences(needle_file: Path) -> Tuple[str, str]:
-    """
-    Extract the aligned sequences from Needle file and remove 
-    positions where the reference has a gap.
-    Returns (anchored_ref, anchored_query)
-    """
-    if not needle_file.exists():
-        return "", ""
-    
-    ref_aln = []
-    que_aln = []
-    
-    # Simple EMBOSS Needle sequence parser
-    # Looks for lines starting with sequence names
-    with open(needle_file, 'r') as f:
-        lines = f.readlines()
-        
-    # EMBOSS output is tricky to parse manually for sequences, 
-    # but we can look for the block lines
-    # Usually: name position seq position
-    for line in lines:
-        if line.startswith("#") or not line.strip():
-            continue
-        # Extract sequence lines - this is a bit heuristic for standard Needle output
-        parts = line.split()
-        if len(parts) >= 3 and not parts[0].isdigit():
-            # We assume first sequence encountered is Ref, second is Query
-            # This is fragile, but since we controlled the input to needle, 
-            # we know the order.
-            pass
-
-    # A more robust way is to use Bio.AlignIO if Needle format is supported
-    from Bio import AlignIO
+    """Extract aligned sequences from Needle file and remove reference gaps."""
     try:
         alignment = AlignIO.read(needle_file, "emboss")
-        ref_seq = str(alignment[0].seq)
-        que_seq = str(alignment[1].seq)
-        
-        anchored_ref = []
-        anchored_que = []
-        
+        ref_seq, que_seq = str(alignment[0].seq), str(alignment[1].seq)
+        anchored_ref, anchored_que = [], []
         for r, q in zip(ref_seq, que_seq):
             if r != '-':
                 anchored_ref.append(r)
                 anchored_que.append(q)
-        
         return "".join(anchored_ref), "".join(anchored_que)
     except Exception as e:
         logger.error(f"Error parsing sequences from {needle_file}: {e}")
         return "", ""
 
 
+def calculate_accessibility(sequence: str, window_size: int = 150, max_span: int = 100) -> np.ndarray:
+    """Calculate per-nucleotide accessibility (u=1) using ViennaRNA."""
+    if not HAS_VIENNA:
+        logger.warning("ViennaRNA not found. Returning zero accessibility.")
+        return np.zeros(len(sequence))
+    try:
+        # RNA.pfl_fold_up returns 1-based matrix: [pos][u]
+        # u=1 is the probability of a single base being unpaired
+        seq_len = len(sequence)
+        w = min(window_size, seq_len)
+        l = min(max_span, seq_len)
+        probs_matrix = RNA.pfl_fold_up(sequence, 1, w, l)
+        
+        # Convert to 0-based numpy array
+        # matrix[i][1] is prob for segment of length 1 at 1-based pos i
+        acc = np.zeros(seq_len)
+        for i in range(1, seq_len + 1):
+            if i < len(probs_matrix) and 1 < len(probs_matrix[i]):
+                acc[i-1] = probs_matrix[i][1]
+        return acc
+    except Exception as e:
+        logger.error(f"Error calculating accessibility: {e}")
+        return np.zeros(len(sequence))
+
+
+def calculate_column_ic(column: List[str]) -> float:
+    """Calculate Shannon IC for a single alignment column."""
+    valid_bases = [b.upper() for b in column if b.upper() in 'ACGTU']
+    n = len(valid_bases)
+    if n == 0: return 0.0
+    s, h_max, ln2 = 4, 2.0, math.log(2)
+    counts = {b: valid_bases.count(b) for b in 'ACGT'}
+    if 'U' in valid_bases: counts['T'] += valid_bases.count('U')
+    h_l = 0
+    for b in 'ACGT':
+        p = counts[b] / n
+        if p > 0: h_l -= p * math.log2(p)
+    e_n = (s - 1) / (2 * n * ln2)
+    return max(0, h_max - (h_l + e_n))
+
+
+def calculate_information_content(alignment_file: Path, reference_id: Optional[str] = None) -> pd.DataFrame:
+    """Calculate IC per alignment position, mapped to reference."""
+    records = list(SeqIO.parse(alignment_file, "fasta"))
+    if not records: return pd.DataFrame()
+    aln_len = len(records[0].seq)
+    ref_seq = next((str(r.seq) for r in records if reference_id == r.id), None)
+    results = []
+    ref_pos = 0
+    for i in range(aln_len):
+        col = [str(r.seq[i]) for r in records]
+        is_ref_gap = False
+        if ref_seq:
+            if ref_seq[i] != '-': ref_pos += 1
+            else: is_ref_gap = True
+        results.append({
+            "Position": i + 1, 
+            "ReferencePosition": ref_pos if not is_ref_gap else None,
+            "IC": calculate_column_ic(col),
+            "Identity": 1.0 if len(set(col)) == 1 and col[0] != '-' else (sum(1 for b in col[1:] if b == col[0] and b != '-') / (len(col)-1) if len(col) > 1 else 0.0)
+        })
+    return pd.DataFrame(results)
+
+
 @app.command()
 def fetch_cds(
-    input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i", help="Input file with gene IDs and names."),
-    output_dir: Path = typer.Option(Path("output"), "--output", "-o", help="Base output directory."),
-    species_file: Optional[Path] = typer.Option(Path("input/insects_list.csv"), "--species-list", "-s", help="Optional CSV file with species to keep."),
-    reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r", help="Designated reference organism."),
-    taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t", help="NCBI Taxonomy ID for filtering."),
+    input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i"),
+    output_dir: Path = typer.Option(Path("output"), "--output", "-o"),
+    species_file: Optional[Path] = typer.Option(Path("input/insects_list.csv"), "--species-list", "-s"),
+    reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
+    taxon: str = typer.Option(DEFAULT_TAXON, "--taxon", "-t"),
 ):
-    """
-    Fetch CDS sequences and prepare reference organism folder.
-    """
-    if not input_file.exists():
-        logger.error(f"Input file not found: {input_file}")
-        raise typer.Exit(code=1)
-
-    orthologs_dir = output_dir / "orthologs"
-    orthologs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Only create folder for reference organism
-    ref_safe = reference_organism.replace(" ", "_")
-    organisms_base = output_dir / "Organisms"
-    ref_base = organisms_base / ref_safe
+    """Fetch CDS and prepare reference-specific folder."""
+    if not input_file.exists(): raise typer.Exit(1)
+    (output_dir / "orthologs").mkdir(parents=True, exist_ok=True)
+    ref_base = output_dir / "Organisms" / reference_organism.replace(" ", "_")
     ref_base.mkdir(parents=True, exist_ok=True)
-
     target_species = set()
     if species_file and species_file.exists():
-        species_df = pd.read_csv(species_file)
-        col = "Species" if "Species" in species_df.columns else species_df.columns[0]
-        target_species = set(species_df[col].astype(str).str.strip().tolist())
-    
+        df = pd.read_csv(species_file)
+        target_species = set(df[df.columns[0 if "Species" not in df.columns else list(df.columns).index("Species")]].astype(str).str.strip())
     target_species.add(reference_organism)
-
-    data = []
     lines = input_file.read_text().splitlines()
-    for line in lines:
-        if not line.strip(): continue
-        parts = [s.strip() for s in line.split(",", 1)]
-        data.append(parts if len(parts) == 2 else [parts[0], parts[0]])
-    df = pd.DataFrame(data, columns=["gene_id", "gene_name"])
-
-    logger.info(f"Processing {len(df)} genes for reference {reference_organism}...")
-
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Fetching sequences"):
-        gene_id, gene_name = row["gene_id"], row["gene_name"]
-        cluster_id = find_cluster_for_gene(gene_id, gene_name, taxon)
+    df_genes = pd.DataFrame([([s.strip() for s in l.split(",", 1)] if "," in l else [l.strip(), l.strip()]) for l in lines if l.strip()], columns=["gene_id", "gene_name"])
+    logger.info(f"Processing {len(df_genes)} genes for {reference_organism}...")
+    for _, row in tqdm(df_genes.iterrows(), total=len(df_genes), desc="Fetching"):
+        cluster_id = find_cluster_for_gene(row["gene_id"], row["gene_name"], taxon)
         if not cluster_id: continue
-        fasta_content = fetch_fasta(cluster_id, taxon)
-        if fasta_content and fasta_content.strip():
-            filtered_records = []
-            for part in fasta_content.split(">"):
-                if not part.strip(): continue
-                header = part.split("\n", 1)[0]
-                try:
-                    meta = json.loads(header[header.find("{") : header.rfind("}") + 1])
-                    if meta.get("organism_name", "").strip() in target_species:
-                        filtered_records.append(f">{part.strip()}")
-                except: pass
-            
-            fasta_content = "\n".join(filtered_records) + "\n" if filtered_records else ""
-            if fasta_content.strip():
-                safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in gene_name.replace(" ", "_"))
-                output_file = orthologs_dir / f"{safe_name}_{gene_id}_{cluster_id}.fasta"
-                output_file.write_text(fasta_content)
+        fasta = fetch_fasta(cluster_id, taxon)
+        if fasta:
+            recs = [f">{p.strip()}" for p in fasta.split(">") if p.strip() and json.loads(p.split("\n", 1)[0][p.find("{"):p.rfind("}")+1]).get("organism_name", "").strip() in target_species]
+            if recs:
+                safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in row["gene_name"].replace(" ", "_"))
+                (output_dir / "orthologs" / f"{safe_name}_{row['gene_id']}_{cluster_id}.fasta").write_text("\n".join(recs) + "\n")
 
 
 @app.command()
 def plot_lengths(
-    fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i", help="Directory containing FASTAs."),
-    output_base: Path = typer.Option(Path("output"), "--output", "-o", help="Base output directory."),
+    fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i"),
+    output_base: Path = typer.Option(Path("output"), "--output", "-o"),
 ):
     """Generate CDS length distribution plots."""
-    if not fasta_dir.exists(): raise typer.Exit(code=1)
-    
-    msa_base = output_base / "msa"
     summary_dir = output_base / "summary_plots"
     summary_dir.mkdir(parents=True, exist_ok=True)
-    
     all_data = []
-    for fasta_file in tqdm(list(fasta_dir.glob("*.fasta")), desc="Parsing FASTAs"):
-        gene_name = get_gene_name(fasta_file.stem)
-        for record in SeqIO.parse(fasta_file, "fasta"):
-            try:
-                meta = json.loads(record.description[record.description.find("{") : record.description.rfind("}") + 1])
-                all_data.append({"Gene": gene_name, "Organism": meta.get("organism_name", "Unknown"), "Length": len(record.seq)})
-            except: pass
-    
+    for f in list(fasta_dir.glob("*.fasta")):
+        gene = get_gene_name(f.stem)
+        for r in SeqIO.parse(f, "fasta"):
+            meta = json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1])
+            all_data.append({"Gene": gene, "Organism": meta.get("organism_name", "Unknown"), "Length": len(r.seq)})
     if not all_data: return
     df = pd.DataFrame(all_data)
-    
-    for gene in df["Gene"].unique():
-        gene_dir = msa_base / gene
-        gene_dir.mkdir(parents=True, exist_ok=True)
+    unique_genes = df["Gene"].unique()
+    logger.info(f"Generating plots for {len(unique_genes)} unique genes...")
+    for gene in tqdm(unique_genes, desc="Generating gene plots"):
+        logger.info(f"Plotting length distribution for {gene}")
+        p_dir = output_base / "msa" / gene / "plots"
+        p_dir.mkdir(parents=True, exist_ok=True)
         plt.figure(figsize=(12, 6))
         sns.boxplot(data=df[df["Gene"] == gene], x="Organism", y="Length")
-        plt.xticks(rotation=45, ha='right')
-        plt.title(f"CDS Length Distribution: {gene}")
-        plt.tight_layout()
-        plt.savefig(gene_dir / "length_distribution.png")
-        plt.close()
+        plt.xticks(rotation=45, ha='right'); plt.title(f"CDS Length Distribution: {gene}"); plt.tight_layout()
+        plt.savefig(p_dir / "length_distribution.png"); plt.close()
 
     plt.figure(figsize=(14, 8))
     sns.barplot(data=df.groupby(["Gene", "Organism"], observed=True)["Length"].mean().reset_index(), x="Gene", y="Length", hue="Organism")
-    plt.xticks(rotation=45, ha='right')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(summary_dir / "summary_length_comparison.png")
-    plt.close()
+    plt.xticks(rotation=45, ha='right'); plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.tight_layout()
+    plt.savefig(summary_dir / "summary_length_comparison.png"); plt.close()
 
 
 @app.command()
@@ -269,59 +257,31 @@ def align_sequences(
     slurm: bool = typer.Option(True),
 ):
     """Perform MSA using Clustal Omega."""
-    msa_base = output_base / "msa"
-    for fasta_file in tqdm(list(fasta_dir.glob("*.fasta")), desc="MSA"):
-        gene_name = get_gene_name(fasta_file.stem)
-        gene_dir = msa_base / gene_name
-        gene_dir.mkdir(parents=True, exist_ok=True)
-        records = list(SeqIO.parse(fasta_file, "fasta"))
-        if len(records) < 2: continue
-        
-        # Find reference index
-        ref_idx = -1
-        max_len = -1
-        for i, r in enumerate(records):
-            try:
-                meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
-                if reference_organism.lower() in meta.get("organism_name", "").lower():
-                    if len(r.seq) > max_len:
-                        max_len = len(r.seq)
-                        ref_idx = i
-            except: pass
-        
-        renamed = []
-        ref_id = None
-        for i, r in enumerate(records):
-            try:
-                meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
-                name = meta.get("organism_name", "Unknown").replace(" ", "_")
-            except: name = r.id
+    for f in tqdm(list(fasta_dir.glob("*.fasta")), desc="MSA"):
+        gene = get_gene_name(f.stem)
+        g_dir = output_base / "msa" / gene
+        for d in ["fasta", "plots", "slurm"]: (g_dir / d).mkdir(parents=True, exist_ok=True)
+        recs = list(SeqIO.parse(f, "fasta"))
+        if len(recs) < 2: continue
+        ref_idx = next((i for i, r in enumerate(recs) if reference_organism.lower() in json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "").lower()), -1)
+        renamed, ref_id = [], None
+        for i, r in enumerate(recs):
+            name = json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "Unknown").replace(" ", "_")
             rid = f"{name}_{i}"
-            if i == ref_idx:
-                ref_id = rid
-                renamed.insert(0, SeqRecord(r.seq, id=rid, description=""))
-            else:
-                renamed.append(SeqRecord(r.seq, id=rid, description=""))
-        
-        temp_in = gene_dir / "renamed_orthologs.fasta"
+            if i == ref_idx: ref_id = rid; renamed.insert(0, SeqRecord(r.seq, id=rid, description=""))
+            else: renamed.append(SeqRecord(r.seq, id=rid, description=""))
+        temp_in = g_dir / "fasta" / "renamed_orthologs.fasta"
         SeqIO.write(renamed, temp_in, "fasta")
-        
-        aln = gene_dir / "aligned.fasta"
-        plot = gene_dir / "alignment.png"
-        ic_p = gene_dir / "information_content.png"
-        ic_c = gene_dir / "information_content.csv"
-        
+        aln, plot, ic_p, ic_c = g_dir / "fasta" / "aligned.fasta", g_dir / "plots" / "alignment.png", g_dir / "plots" / "information_content.png", g_dir / "information_content.csv"
         if slurm:
-            script = gene_dir / "slurm" / f"msa_{fasta_file.stem}.sh"
-            script.parent.mkdir(parents=True, exist_ok=True)
+            script = g_dir / "slurm" / f"msa_{f.stem}.sh"
             ref_arg = f'--reference-id "{ref_id}"' if ref_id else ""
-            content = f"#!/bin/bash\n#SBATCH --job-name=msa_{gene_name[:10]}\n#SBATCH --output={script.parent}/job.out\n#SBATCH --cpus-per-task=4\n#SBATCH --mem=8G\n#SBATCH --time=02:00:00\n\nmodule load clustal-omega\nclustalo -i {temp_in.resolve()} -o {aln.resolve()} --force --outfmt=fasta --threads=4\n{sys.executable} {Path(__file__).resolve()} internal-plot {aln.resolve()} {plot.resolve()} {ic_p.resolve()} {ic_c.resolve()} \"{gene_name}\" {ref_arg}\n"
+            content = f"#!/bin/bash\n#SBATCH --job-name=msa_{gene[:10]}\n#SBATCH --output={g_dir}/slurm/job.out\n#SBATCH --cpus-per-task=4\n#SBATCH --mem=8G\n#SBATCH --time=02:00:00\n\nmodule load clustal-omega\nclustalo -i {temp_in.resolve()} -o {aln.resolve()} --force --outfmt=fasta --threads=4\n{sys.executable} {Path(__file__).resolve()} internal-plot {aln.resolve()} {plot.resolve()} {ic_p.resolve()} {ic_c.resolve()} \"{gene}\" {ref_arg}\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:
             subprocess.run(["bash", "-c", f"module load clustal-omega && clustalo -i {temp_in} -o {aln} --force --outfmt=fasta"], check=True)
-            from dsrna_worst_case_pipeline_v2.orthodb_fetch_cds import internal_plot
-            app.command(hidden=True)(internal_plot)(aln, plot, ic_p, ic_c, gene_name, ref_id)
+            internal_plot(aln, plot, ic_p, ic_c, gene, ref_id)
 
 
 @app.command()
@@ -331,120 +291,116 @@ def pairwise_align(
     reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
     slurm: bool = typer.Option(True),
 ):
-    """
-    Perform Pairwise Alignment anchored to reference and generate plots.
-    """
-    ref_safe = reference_organism.replace(" ", "_")
-    org_base = output_base / "Organisms" / ref_safe
-    
-    for fasta_file in tqdm(list(fasta_dir.glob("*.fasta")), desc="Pairwise"):
-        gene_name = get_gene_name(fasta_file.stem)
-        gene_dir = org_base / gene_name
-        gene_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Identify reference record
-        records = list(SeqIO.parse(fasta_file, "fasta"))
-        ref_rec = None
-        for r in records:
-            try:
-                meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
-                if reference_organism.lower() in meta.get("organism_name", "").lower():
-                    if ref_rec is None or len(r.seq) > len(ref_rec.seq):
-                        ref_rec = r
-            except: pass
-        
+    """Perform Pairwise Alignment anchored to reference."""
+    org_base = output_base / "Organisms" / reference_organism.replace(" ", "_")
+    for f in tqdm(list(fasta_dir.glob("*.fasta")), desc="Pairwise"):
+        gene = get_gene_name(f.stem)
+        g_dir = org_base / gene
+        for d in ["fasta", "plots", "needle"]: (g_dir / d).mkdir(parents=True, exist_ok=True)
+        recs = list(SeqIO.parse(f, "fasta"))
+        ref_rec = next((r for r in recs if reference_organism.lower() in json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "").lower()), None)
         if not ref_rec: continue
-        
-        ref_tmp = gene_dir / "reference.fasta"
+        ref_tmp = g_dir / "fasta" / "reference.fasta"
         SeqIO.write(ref_rec, ref_tmp, "fasta")
-        
         if slurm:
-            script = gene_dir / "slurm_pairwise.sh"
-            script.parent.mkdir(parents=True, exist_ok=True)
-            content = f"""#!/bin/bash
-#SBATCH --job-name=pair_{gene_name[:10]}
-#SBATCH --output={gene_dir}/job_pairwise.out
-#SBATCH --mem=4G
-#SBATCH --time=01:00:00
-
-module load EMBOSS
-{sys.executable} {Path(__file__).resolve()} internal-pairwise-run "{fasta_file.resolve()}" "{ref_tmp.resolve()}" "{gene_dir.resolve()}" "{reference_organism}" "{gene_name}"
-"""
+            script = g_dir / "slurm_pairwise.sh"
+            content = f"#!/bin/bash\n#SBATCH --job-name=pair_{gene[:10]}\n#SBATCH --output={g_dir}/job_pairwise.out\n#SBATCH --mem=4G\n#SBATCH --time=01:00:00\n\nmodule load EMBOSS\n{sys.executable} {Path(__file__).resolve()} internal-pairwise-run \"{f.resolve()}\" \"{ref_tmp.resolve()}\" \"{g_dir.resolve()}\" \"{reference_organism}\" \"{gene}\"\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:
-            internal_pairwise_run(fasta_file, ref_tmp, gene_dir, reference_organism, gene_name)
+            internal_pairwise_run(f, ref_tmp, g_dir, reference_organism, gene)
 
 
 @app.command(hidden=True)
 def internal_pairwise_run(fasta_file: Path, ref_tmp: Path, gene_dir: Path, reference_organism: str, gene_name: str):
-    """Helper to run pairwise alignments and generate anchored/metrics plots."""
-    records = list(SeqIO.parse(fasta_file, "fasta"))
-    metrics = []
-    anchored_records = []
-    
-    # We need the reference record again
+    recs = list(SeqIO.parse(fasta_file, "fasta"))
     ref_rec = list(SeqIO.parse(ref_tmp, "fasta"))[0]
-    # Add reference itself to anchored records (first)
-    anchored_records.append(SeqRecord(ref_rec.seq, id=f"{reference_organism.replace(' ', '_')}_REF", description=""))
+    ref_acc = calculate_accessibility(str(ref_rec.seq))
+    
+    metrics, anchored_recs = [], [SeqRecord(ref_rec.seq, id=f"REF_{reference_organism.replace(' ', '_')}", description="")]
+    window_data = [] # List of DataFrames for each NTO window results
 
-    for r in records:
-        try:
-            meta = json.loads(r.description[r.description.find("{") : r.description.rfind("}") + 1])
-            org_name = meta.get("organism_name", "Unknown")
-        except: org_name = r.id
+    for r in recs:
+        org_name = json.loads(r.description[r.description.find("{"):r.description.rfind("}")+1]).get("organism_name", "Unknown")
+        if org_name.lower() == reference_organism.lower(): continue
         
-        if org_name.lower() == reference_organism.lower():
-            continue
+        q_tmp = gene_dir / "fasta" / f"temp_{org_name.replace(' ', '_')}.fasta"
+        SeqIO.write(r, q_tmp, "fasta")
+        out_n = gene_dir / "needle" / f"{org_name.replace(' ', '_')}_vs_ref.needle"
+        subprocess.run(["needle", "-asequence", str(ref_tmp), "-bsequence", str(q_tmp), "-outfile", str(out_n), "-datafile", "EDNAFULL", "-gapopen", "10", "-gapextend", "0.5"], check=True, capture_output=True)
+        
+        metrics.append({**parse_needle_output(out_n), "Organism": org_name})
+        ref_anch, que_anch = get_anchored_sequences(out_n)
+        if que_anch: anchored_recs.append(SeqRecord(Seq(que_anch), id=org_name.replace(' ', '_'), description=""))
+        
+        # Windowed Analysis
+        aln = AlignIO.read(out_n, "emboss")
+        ref_aln, que_aln = str(aln[0].seq), str(aln[1].seq)
+        que_acc = calculate_accessibility(str(r.seq))
+        
+        # Coordinate map: ref_nucleotide_index (0-based) -> alignment_column
+        ref_to_col = [i for i, b in enumerate(ref_aln) if b != '-']
+        # Coordinate map: que_nucleotide_index (0-based) -> alignment_column
+        que_to_col = [i for i, b in enumerate(que_aln) if b != '-']
+        col_to_que_acc = {col: que_acc[q_idx] for q_idx, col in enumerate(que_to_col)}
+        
+        results = []
+        for start_ref in range(len(ref_to_col) - 299):
+            end_ref = start_ref + 299
+            start_col, end_col = ref_to_col[start_ref], ref_to_col[end_ref]
+            span = end_col - start_col + 1
             
-        que_tmp = gene_dir / f"temp_query_{org_name.replace(' ', '_')}.fasta"
-        SeqIO.write(r, que_tmp, "fasta")
-        
-        out_needle = gene_dir / f"{org_name.replace(' ', '_')}_vs_ref.needle"
-        subprocess.run([
-            "needle", "-asequence", str(ref_tmp), "-bsequence", str(que_tmp),
-            "-outfile", str(out_needle), "-datafile", "EDNAFULL", "-gapopen", "10", "-gapextend", "0.5"
-        ], check=True, capture_output=True)
-        
-        # Parse Stats
-        stats = parse_needle_output(out_needle)
-        stats["Organism"] = org_name
-        metrics.append(stats)
-        
-        # Anchored Sequence (no gaps in ref)
-        ref_anchored, que_anchored = get_anchored_sequences(out_needle)
-        if que_anchored:
-            anchored_records.append(SeqRecord(Seq(que_anchored), id=org_name.replace(' ', '_'), description=""))
-        
-        que_tmp.unlink()
+            win_ref_aln, win_que_aln = ref_aln[start_col:end_col+1], que_aln[start_col:end_col+1]
+            ident = sum(1 for a, b in zip(win_ref_aln, win_que_aln) if a == b and a != '-') / span
+            
+            # IC per column in span
+            win_ic = np.mean([calculate_column_ic([ref_aln[c], que_aln[c]]) for c in range(start_col, end_col+1)])
+            # NTO Accessibility (sum mapped probs / span)
+            win_q_acc = sum(col_to_que_acc.get(c, 0.0) for c in range(start_col, end_col+1)) / span
+            
+            results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc})
+        window_data.append(pd.DataFrame(results))
+        q_tmp.unlink()
 
-    # Save Metrics
+    # Plot Metrics Comparison
     if metrics:
-        df_metrics = pd.DataFrame(metrics)
-        df_metrics.to_csv(gene_dir / "pairwise_metrics.csv", index=False)
-        
-        # 1. Metrics Comparison Plot
+        df = pd.DataFrame(metrics)
+        df.to_csv(gene_dir / "pairwise_metrics.csv", index=False)
         plt.figure(figsize=(10, 6))
-        df_melt = df_metrics.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"])
-        sns.barplot(data=df_melt, x="Organism", y="value", hue="variable")
-        plt.xticks(rotation=45, ha='right')
-        plt.title(f"Pairwise Metrics against Reference: {gene_name}")
-        plt.ylabel("Percentage (%)")
-        plt.tight_layout()
-        plt.savefig(gene_dir / "metrics_comparison.png", dpi=300)
-        plt.close()
+        sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
+        plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics: {gene_name}"); plt.ylabel("Percentage (%)")
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(gene_dir / "plots" / "metrics_comparison.png", dpi=300); plt.close()
 
-    # 2. Anchored Alignment Plot
-    if len(anchored_records) > 1:
-        anchored_fasta = gene_dir / "anchored_alignment.fasta"
-        SeqIO.write(anchored_records, anchored_fasta, "fasta")
+    # Plot Anchored Alignment
+    if len(anchored_recs) > 1:
+        a_fa = gene_dir / "fasta" / "anchored_alignment.fasta"
+        SeqIO.write(anchored_recs, a_fa, "fasta")
         try:
-            mv = MsaViz(anchored_fasta, format="fasta", show_consensus=True)
+            mv = MsaViz(a_fa, format="fasta", show_consensus=True)
             fig = mv.plotfig()
             fig.suptitle(f"Reference-Anchored Alignment: {gene_name}\n(Gaps in reference removed)", fontsize=14)
-            fig.savefig(gene_dir / "anchored_alignment.png", dpi=300, bbox_inches="tight")
-        except Exception as e:
-            print(f"Error plotting anchored alignment: {e}")
+            fig.tight_layout(rect=[0, 0.03, 1, 0.95]); fig.savefig(gene_dir / "plots" / "anchored_alignment.png", dpi=300); plt.close(fig)
+        except Exception as e: print(f"Error plotting anchored: {e}")
+
+    # Plot Windowed Results (Cross-Species Average)
+    if window_data:
+        avg_df = pd.concat(window_data).groupby("RefPos").mean().reset_index()
+        avg_df.to_csv(gene_dir / "windowed_analysis.csv", index=False)
+        
+        # 1. Accessibility Plot
+        plt.figure(figsize=(12, 5))
+        ref_win_acc = [np.mean(ref_acc[i:i+300]) for i in range(len(ref_acc)-299)]
+        plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2)
+        plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", alpha=0.7)
+        plt.title(f"Windowed Accessibility (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
+        plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(gene_dir / "plots" / "windowed_accessibility.png", dpi=300); plt.close()
+        
+        # 2. Conservation Plot
+        plt.figure(figsize=(12, 5))
+        plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
+        plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6) # Scale IC for visibility
+        plt.title(f"Windowed Conservation (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Score")
+        plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(gene_dir / "plots" / "windowed_conservation.png", dpi=300); plt.close()
 
 
 @app.command(hidden=True)
@@ -453,18 +409,19 @@ def internal_plot(aln_file: Path, plot_path: Path, ic_plot: Path, ic_csv: Path, 
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
         fig = mv.plotfig()
         fig.suptitle(f"Multiple Sequence Alignment: {title}", fontsize=16)
-        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95]); fig.savefig(plot_path, dpi=300); plt.close(fig)
         ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
             ic_df.to_csv(ic_csv, index=False)
             plt.figure(figsize=(15, 5))
             plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4)
             plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
-            plt.ylim(0, 2.1); plt.xlabel(f"Alignment Position{' (Ref: ' + reference_id + ')' if reference_id else ''}")
+            plt.ylim(0, 2.1)
+            ref_name = reference_id.rsplit('_', 1)[0].replace('_', ' ') if reference_id else ""
+            plt.xlabel(f"Alignment Position{' (Ref: ' + ref_name + ')' if ref_name else ''}")
             plt.ylabel("Information Content (bits)"); plt.title(f"Information Content: {title}")
-            plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(); plt.savefig(ic_plot, dpi=300); plt.close()
-    except Exception as e:
-        print(f"Error in plotting: {e}"); sys.exit(1)
+            plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(ic_plot, dpi=300); plt.close()
+    except Exception as e: print(f"Error: {e}"); sys.exit(1)
 
 def main(): app()
 if __name__ == "__main__": main()
