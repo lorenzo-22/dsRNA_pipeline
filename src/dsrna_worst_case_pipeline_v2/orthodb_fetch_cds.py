@@ -362,10 +362,17 @@ def internal_pairwise_run(fasta_file: Path, ref_tmp: Path, g_dir: Path, referenc
         if que_anch: anchored_recs.append(SeqRecord(Seq(que_anch), id=f"{org_name.replace(' ', '_')}_{i}", description=""))
         q_tmp.unlink()
     if metrics:
-        pd.DataFrame(metrics).to_csv(g_dir / "pairwise_metrics.csv", index=False)
-        plt.figure(figsize=(10, 6)); sns.barplot(data=pd.DataFrame(metrics).melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
-        plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics: {gene_name}"); plt.ylabel("Percentage (%)")
-        plt.tight_layout(rect=[0, 0.03, 1, 0.90]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300); plt.close()
+        df = pd.DataFrame(metrics)
+        df.to_csv(g_dir / "pairwise_metrics.csv", index=False)
+        plt.figure(figsize=(12, 7)) # Increased width and height
+        sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
+        plt.xticks(rotation=45, ha='right')
+        plt.title(f"Pairwise Metrics against Reference: {gene_name}")
+        plt.ylabel("Percentage (%)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # Legend outside
+        plt.tight_layout()
+        plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300, bbox_inches="tight")
+        plt.close()
     if len(anchored_recs) > 1:
         a_fa = g_dir / "fasta" / "anchored_alignment.fasta"
         SeqIO.write(anchored_recs, a_fa, "fasta")
