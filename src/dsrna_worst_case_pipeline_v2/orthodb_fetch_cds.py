@@ -233,15 +233,20 @@ def plot_lengths(
     if not all_data: return
     df = pd.DataFrame(all_data)
     unique_genes = df["Gene"].unique()
+    
+    # Folder for individual length distribution plots
+    length_dist_dir = output_base / "length_distributions"
+    length_dist_dir.mkdir(parents=True, exist_ok=True)
+    
     logger.info(f"Generating plots for {len(unique_genes)} unique genes...")
     for gene in tqdm(unique_genes, desc="Generating gene plots"):
         logger.info(f"Plotting length distribution for {gene}")
-        p_dir = output_base / "msa" / gene / "plots"
-        p_dir.mkdir(parents=True, exist_ok=True)
+        gene_df = df[df["Gene"] == gene]
+        
         plt.figure(figsize=(12, 6))
-        sns.boxplot(data=df[df["Gene"] == gene], x="Organism", y="Length")
+        sns.boxplot(data=gene_df, x="Organism", y="Length")
         plt.xticks(rotation=45, ha='right'); plt.title(f"CDS Length Distribution: {gene}"); plt.tight_layout()
-        plt.savefig(p_dir / "length_distribution.png"); plt.close()
+        plt.savefig(length_dist_dir / f"{gene}_length_distribution.png"); plt.close()
 
     plt.figure(figsize=(14, 8))
     sns.barplot(data=df.groupby(["Gene", "Organism"], observed=True)["Length"].mean().reset_index(), x="Gene", y="Length", hue="Organism")
