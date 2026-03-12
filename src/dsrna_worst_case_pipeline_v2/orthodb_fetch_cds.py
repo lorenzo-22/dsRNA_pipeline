@@ -127,19 +127,13 @@ def run_vienna_accessibility(sequence: str, window_size: int = 150, max_span: in
         return np.zeros(len(sequence))
     try:
         seq_len = len(sequence)
-        # Use T->U for ViennaRNA
         rna_seq = sequence.replace("T", "U").replace("t", "u")
         w = min(window_size, seq_len)
         l = min(max_span, seq_len)
-        
-        # RNA.pfl_fold_up returns a SWIG object that behaves like a 2D array
         probs_matrix = RNA.pfl_fold_up(rna_seq, 1, w, l)
-        
-        # Result matrix is 1-based indexing for position
         acc = np.zeros(seq_len)
         for i in range(1, seq_len + 1):
             try:
-                # probs_matrix[i][1] is probability for length 1 at position i
                 acc[i-1] = probs_matrix[i][1]
             except (IndexError, TypeError):
                 acc[i-1] = 0.0
@@ -185,6 +179,19 @@ def calculate_information_content(alignment_file: Path, reference_id: Optional[s
             "IC": calculate_column_ic(col)
         })
     return pd.DataFrame(results)
+
+
+def add_labels_to_barplot(ax):
+    """Add percentage labels above bars in a barplot."""
+    for p in ax.patches:
+        height = p.get_height()
+        if height > 0:
+            ax.annotate(f'{height:.1f}%', 
+                        (p.get_x() + p.get_width() / 2., height), 
+                        ha = 'center', va = 'center', 
+                        xytext = (0, 9), 
+                        textcoords = 'offset points',
+                        fontsize=8)
 
 
 @app.command()
@@ -364,23 +371,23 @@ def internal_pairwise_run(fasta_file: Path, ref_tmp: Path, g_dir: Path, referenc
     if metrics:
         df = pd.DataFrame(metrics)
         df.to_csv(g_dir / "pairwise_metrics.csv", index=False)
-        plt.figure(figsize=(12, 7)) # Increased width and height
-        sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
-        plt.xticks(rotation=45, ha='right')
-        plt.title(f"Pairwise Metrics against Reference: {gene_name}")
-        plt.ylabel("Percentage (%)")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # Legend outside
-        plt.tight_layout()
-        plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300, bbox_inches="tight")
-        plt.close()
+        plt.figure(figsize=(12, 7))
+        ax = sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
+        
+        # Add average similarity line
+        avg_sim = df["Similarity"].mean()
+        plt.axhline(avg_sim, color='blue', linestyle='--', alpha=0.7, label=f'Avg Similarity ({avg_sim:.1f}%)')
+        
+        plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics against Reference: {gene_name}"); plt.ylabel("Percentage (%)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax)
+        plt.tight_layout(rect=[0, 0.03, 0.85, 0.90]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
     if len(anchored_recs) > 1:
         a_fa = g_dir / "fasta" / "anchored_alignment.fasta"
         SeqIO.write(anchored_recs, a_fa, "fasta")
         try:
             mv = MsaViz(a_fa, format="fasta", show_consensus=True)
             fig = mv.plotfig(); fig.suptitle(f"Reference-Anchored Alignment: {gene_name}\n(Gaps in reference removed)", fontsize=14)
-            fig.subplots_adjust(top=0.85)
-            fig.savefig(g_dir / "plots" / "anchored_alignment.png", dpi=300, bbox_inches="tight"); plt.close(fig)
+            fig.subplots_adjust(top=0.85); fig.savefig(g_dir / "plots" / "anchored_alignment.png", dpi=300, bbox_inches="tight"); plt.close(fig)
         except Exception as e: print(f"Error plotting anchored: {e}")
 
 
@@ -413,35 +420,18 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
             results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc, "Organism": org_name})
         window_data.append(pd.DataFrame(results))
     if window_data:
-        # Concatenate all window data
         full_win_df = pd.concat(window_data)
         avg_df = full_win_df.groupby("RefPos").mean().reset_index()
         avg_df.to_csv(acc_dir / "data" / "windowed_analysis.csv", index=False)
-        
-        # 1. Accessibility Plot
-        plt.figure(figsize=(12, 6))
-        
-        # Plot individual NTO accessibilities with distinct colors
-        colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
+        plt.figure(figsize=(12, 6)); colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
         for i, (df, color) in enumerate(zip(window_data, colors)):
-            org_label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
-            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.3, lw=1, label=org_label)
-            
-        # Plot Reference
+            label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
+            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.3, lw=1, label=label)
         ref_win_acc = [np.mean(ref_acc[idx:idx+300]) for idx in range(len(ref_acc)-299)]
         plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2.5)
-        
-        # Plot Average NTO
         plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", lw=2, linestyle="--")
-        
-        plt.title(f"Windowed Accessibility (300nt): {gene_name}")
-        plt.xlabel("Reference Nucleotide Position")
-        plt.ylabel("Probability Unpaired")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300, bbox_inches="tight")
-        plt.close()
+        plt.title(f"Windowed Accessibility (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small'); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300, bbox_inches="tight"); plt.close()
         plt.figure(figsize=(12, 5)); plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
         plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6)
         plt.title(f"Windowed Conservation (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Score")
@@ -454,6 +444,27 @@ def internal_msa_plot(aln_file: Path, plot_path: Path, ic_plot: Path, ic_csv: Pa
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
         fig = mv.plotfig(); fig.suptitle(f"Multiple Sequence Alignment: {title}", fontsize=16)
         fig.subplots_adjust(top=0.85); fig.savefig(plot_path, dpi=300, bbox_inches="tight"); plt.close(fig)
+        records = list(SeqIO.parse(aln_file, "fasta"))
+        metrics = []
+        ref_rec = next((r for r in records if reference_id == r.id), records[0])
+        ref_seq = str(ref_rec.seq)
+        for r in records:
+            if r.id == ref_rec.id: continue
+            matches = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a == b and a != '-')
+            total = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a != '-' or b != '-')
+            gaps = sum(1 for b in str(r.seq) if b == '-')
+            metrics.append({"Organism": r.id.rsplit('_', 1)[0].replace('_', ' '), "Identity": (matches/total)*100 if total > 0 else 0, "Gaps": (gaps/len(ref_seq))*100})
+        if metrics:
+            df = pd.DataFrame(metrics); plt.figure(figsize=(12, 7))
+            ax = sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Identity", "Gaps"]), x="Organism", y="value", hue="variable")
+            
+            # Add average identity line
+            avg_id = df["Identity"].mean()
+            plt.axhline(avg_id, color='blue', linestyle='--', alpha=0.7, label=f'Avg Identity ({avg_id:.1f}%)')
+            
+            plt.xticks(rotation=45, ha='right'); plt.title(f"MSA Metrics against Reference: {title}"); plt.ylabel("Percentage (%)")
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax); plt.tight_layout(rect=[0, 0.03, 0.85, 0.95])
+            plt.savefig(plot_path.parent / "msa_metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
         ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
             ic_df.to_csv(ic_csv, index=False); plt.figure(figsize=(15, 5))
