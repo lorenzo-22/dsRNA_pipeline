@@ -230,8 +230,11 @@ def fetch_cds(
 def plot_lengths(
     fasta_dir: Path = typer.Option(Path("output/orthologs"), "--input", "-i"),
     output_base: Path = typer.Option(Path("output"), "--output", "-o"),
+    reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
 ):
     """Generate CDS length distribution plots."""
+    ref_safe = reference_organism.replace(" ", "_")
+    org_base = output_base / "Organisms" / ref_safe
     summary_dir = output_base / "summary_plots"
     summary_dir.mkdir(parents=True, exist_ok=True)
     length_dist_dir = output_base / "length_distributions"
@@ -265,12 +268,14 @@ def align_sequences(
     output_base: Path = typer.Option(Path("output"), "--output", "-o"),
     reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
     slurm: bool = typer.Option(True),
-    mem: str = typer.Option("16G", help="Memory for SLURM job."),
+    mem: str = typer.Option("16G"),
 ):
     """Perform MSA using Clustal Omega."""
+    ref_safe = reference_organism.replace(" ", "_")
+    org_msa_base = output_base / "Organisms" / ref_safe / "msa"
     for f in tqdm(list(fasta_dir.glob("*.fasta")), desc="MSA"):
         gene = get_gene_name(f.stem)
-        g_dir = output_base / "msa" / gene
+        g_dir = org_msa_base / gene
         for d in ["fasta", "plots", "slurm"]: (g_dir / d).mkdir(parents=True, exist_ok=True)
         recs = list(SeqIO.parse(f, "fasta"))
         if len(recs) < 2: continue
@@ -303,7 +308,7 @@ def pairwise_align(
     output_base: Path = typer.Option(Path("output"), "--output", "-o"),
     reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
     slurm: bool = typer.Option(True),
-    mem: str = typer.Option("16G", help="Memory for SLURM job."),
+    mem: str = typer.Option("16G"),
 ):
     """Perform Pairwise Alignment anchored to reference using EMBOSS Needle."""
     org_base = output_base / "Organisms" / reference_organism.replace(" ", "_")
@@ -331,7 +336,7 @@ def calculate_accessibility(
     output_base: Path = typer.Option(Path("output"), "--output", "-o"),
     reference_organism: str = typer.Option("Phaedon cochleariae", "--reference", "-r"),
     slurm: bool = typer.Option(True),
-    mem: str = typer.Option("16G", help="Memory for SLURM job."),
+    mem: str = typer.Option("16G"),
 ):
     """Calculate reference-anchored windowed accessibility and conservation."""
     org_base = output_base / "Organisms" / reference_organism.replace(" ", "_")
@@ -369,18 +374,11 @@ def internal_pairwise_run(fasta_file: Path, ref_tmp: Path, g_dir: Path, referenc
         if que_anch: anchored_recs.append(SeqRecord(Seq(que_anch), id=f"{org_name.replace(' ', '_')}_{i}", description=""))
         q_tmp.unlink()
     if metrics:
-        df = pd.DataFrame(metrics)
-        df.to_csv(g_dir / "pairwise_metrics.csv", index=False)
-        plt.figure(figsize=(12, 7))
-        ax = sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
-        
-        # Add average similarity line
-        avg_sim = df["Similarity"].mean()
-        plt.axhline(avg_sim, color='blue', linestyle='--', alpha=0.7, label=f'Avg Similarity ({avg_sim:.1f}%)')
-        
-        plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics against Reference: {gene_name}"); plt.ylabel("Percentage (%)")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax)
-        plt.tight_layout(rect=[0, 0.03, 0.85, 0.90]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
+        df = pd.DataFrame(metrics); df.to_csv(g_dir / "pairwise_metrics.csv", index=False)
+        plt.figure(figsize=(12, 7)); ax = sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Similarity", "Gaps"]), x="Organism", y="value", hue="variable")
+        avg_s = df["Similarity"].mean(); plt.axhline(avg_s, color='blue', ls='--', alpha=0.7, label=f'Avg Similarity ({avg_s:.1f}%)')
+        plt.xticks(rotation=45, ha='right'); plt.title(f"Pairwise Metrics: {gene_name}"); plt.ylabel("Percentage (%)")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax); plt.tight_layout(rect=[0, 0.03, 0.85, 0.90]); plt.savefig(g_dir / "plots" / "metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
     if len(anchored_recs) > 1:
         a_fa = g_dir / "fasta" / "anchored_alignment.fasta"
         SeqIO.write(anchored_recs, a_fa, "fasta")
@@ -405,91 +403,70 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
         aln = AlignIO.read(needle_file, "emboss")
         ref_aln, que_aln = str(aln[0].seq), str(aln[1].seq)
         que_acc = run_vienna_accessibility(str(r.seq))
-        ref_to_col = [idx for idx, b in enumerate(ref_aln) if b != '-']
-        que_to_col = [idx for idx, b in enumerate(que_aln) if b != '-']
+        ref_to_col, que_to_col = [idx for idx, b in enumerate(ref_aln) if b != '-'], [idx for idx, b in enumerate(que_aln) if b != '-']
         col_to_que_acc = {col: que_acc[q_idx] for q_idx, col in enumerate(que_to_col)}
         results = []
         for start_ref in range(len(ref_to_col) - 299):
-            end_ref = start_ref + 299
-            start_col, end_col = ref_to_col[start_ref], ref_to_col[end_ref]
+            start_col, end_col = ref_to_col[start_ref], ref_to_col[start_ref + 299]
             span = end_col - start_col + 1
-            win_ref_aln, win_que_aln = ref_aln[start_col:end_col+1], que_aln[start_col:end_col+1]
-            ident = sum(1 for a, b in zip(win_ref_aln, win_que_aln) if a == b and a != '-') / span
-            win_ic = np.mean([calculate_column_ic([ref_aln[c], que_aln[c]]) for c in range(start_col, end_col+1)])
+            ident = sum(1 for a, b in zip(ref_aln[start_col:end_col+1], que_aln[start_col:end_col+1]) if a == b and a != '-') / span
             win_q_acc = sum(col_to_que_acc.get(c, 0.0) for c in range(start_col, end_col+1)) / span
-            results.append({"RefPos": start_ref + 1, "Identity": ident, "IC": win_ic, "NTO_Acc": win_q_acc, "Organism": org_name})
+            results.append({"RefPos": start_ref + 1, "Identity": ident, "NTO_Acc": win_q_acc, "Organism": org_name})
         window_data.append(pd.DataFrame(results))
     if window_data:
-        full_win_df = pd.concat(window_data)
-        avg_df = full_win_df.groupby("RefPos").mean().reset_index()
+        full_df = pd.concat(window_data).select(lambda c: c != "Organism" or c == "Organism").select(lambda c: pd.api.types.is_numeric_dtype(full_df[c]) or c == "Organism")
+        # Fixed: Select only numeric columns for mean
+        avg_df = pd.concat(window_data).select_dtypes(include=[np.number]).groupby(pd.concat(window_data)["RefPos"]).mean().reset_index()
         avg_df.to_csv(acc_dir / "data" / "windowed_analysis.csv", index=False)
-        
-        # 1. Ref vs Average NTO Plot
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(12, 6)); colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
+        for df, color in zip(window_data, colors): plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.3, lw=1, label=df["Organism"].iloc[0])
         ref_win_acc = [np.mean(ref_acc[idx:idx+300]) for idx in range(len(ref_acc)-299)]
         plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2.5)
         plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", lw=2, linestyle="--")
-        plt.title(f"Windowed Accessibility (Ref vs Avg NTO): {gene_name}")
-        plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(alpha=0.3); plt.tight_layout()
-        plt.savefig(acc_dir / "plots" / "ref_vs_avg_accessibility.png", dpi=300, bbox_inches="tight")
-        plt.close()
-
-        # 2. All NTOs Plot
+        plt.title(f"Windowed Accessibility: {gene_name}"); plt.xlabel("Ref Position"); plt.ylabel("Prob Unpaired")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small'); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "ref_vs_avg_accessibility.png", dpi=300, bbox_inches="tight"); plt.close()
         plt.figure(figsize=(12, 6))
-        colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
-        for i, (df, color) in enumerate(zip(window_data, colors)):
-            label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
-            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.6, lw=1, label=label)
-        plt.title(f"Windowed Accessibility (All NTOs): {gene_name}")
-        plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small'); plt.grid(alpha=0.3); plt.tight_layout()
-        plt.savefig(acc_dir / "plots" / "all_ntos_accessibility.png", dpi=300, bbox_inches="tight")
-        plt.close()
-
-        # 3. Conservation Plot (Identity and IC)
-        plt.figure(figsize=(12, 5))
-        plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
-        plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6)
-        plt.title(f"Windowed Conservation (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Score")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(alpha=0.3); plt.tight_layout()
-        plt.savefig(acc_dir / "plots" / "windowed_conservation.png", dpi=300, bbox_inches="tight"); plt.close()
+        for df, color in zip(window_data, colors): plt.plot(df["RefPos"], df["Identity"]*100, color=color, alpha=0.3, lw=1, label=df["Organism"].iloc[0])
+        plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="Average Identity", color="red", lw=2, linestyle="--")
+        plt.title(f"Windowed Identity: {gene_name}"); plt.xlabel("Ref Position"); plt.ylabel("% Identity")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small'); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "windowed_identity.png", dpi=300, bbox_inches="tight"); plt.close()
 
 
 @app.command(hidden=True)
 def internal_msa_plot(aln_file: Path, plot_path: Path, ic_plot: Path, ic_csv: Path, title: str, reference_id: Optional[str] = None):
     try:
         mv = MsaViz(aln_file, format="fasta", show_consensus=True)
-        fig = mv.plotfig(); fig.suptitle(f"Multiple Sequence Alignment: {title}", fontsize=16)
-        fig.subplots_adjust(top=0.85); fig.savefig(plot_path, dpi=300, bbox_inches="tight"); plt.close(fig)
-        records = list(SeqIO.parse(aln_file, "fasta"))
+        fig = mv.plotfig(); fig.suptitle(f"MSA: {title}", fontsize=16); fig.subplots_adjust(top=0.85); fig.savefig(plot_path, dpi=300, bbox_inches="tight"); plt.close(fig)
+        recs = list(SeqIO.parse(aln_file, "fasta")); ref_rec = next((r for r in records if reference_id == r.id), recs[0]); ref_seq = str(ref_rec.seq)
         metrics = []
-        ref_rec = next((r for r in records if reference_id == r.id), records[0])
-        ref_seq = str(ref_rec.seq)
-        for r in records:
+        for r in recs:
             if r.id == ref_rec.id: continue
-            matches = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a == b and a != '-')
-            total = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a != '-' or b != '-')
-            gaps = sum(1 for b in str(r.seq) if b == '-')
-            metrics.append({"Organism": r.id.rsplit('_', 1)[0].replace('_', ' '), "Identity": (matches/total)*100 if total > 0 else 0, "Gaps": (gaps/len(ref_seq))*100})
+            m = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a == b and a != '-'); t = sum(1 for a, b in zip(ref_seq, str(r.seq)) if a != '-' or b != '-')
+            metrics.append({"Org": r.id.rsplit('_', 1)[0].replace('_', ' '), "Identity": (m/t)*100 if t > 0 else 0, "Gaps": (str(r.seq).count('-')/len(ref_seq))*100})
         if metrics:
-            df = pd.DataFrame(metrics); plt.figure(figsize=(12, 7))
-            ax = sns.barplot(data=df.melt(id_vars="Organism", value_vars=["Identity", "Gaps"]), x="Organism", y="value", hue="variable")
-            
-            # Add average identity line
-            avg_id = df["Identity"].mean()
-            plt.axhline(avg_id, color='blue', linestyle='--', alpha=0.7, label=f'Avg Identity ({avg_id:.1f}%)')
-            
-            plt.xticks(rotation=45, ha='right'); plt.title(f"MSA Metrics against Reference: {title}"); plt.ylabel("Percentage (%)")
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax); plt.tight_layout(rect=[0, 0.03, 0.85, 0.95])
-            plt.savefig(plot_path.parent / "msa_metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
+            df = pd.DataFrame(metrics); plt.figure(figsize=(12, 7)); ax = sns.barplot(data=df.melt(id_vars="Org", value_vars=["Identity", "Gaps"]), x="Org", y="value", hue="variable")
+            avg_i = df["Identity"].mean(); plt.axhline(avg_i, color='blue', ls='--', label=f'Avg Identity ({avg_i:.1f}%)')
+            plt.xticks(rotation=45, ha='right'); plt.title(f"MSA Metrics: {title}"); plt.ylabel("%"); plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); add_labels_to_barplot(ax); plt.tight_layout(rect=[0, 0.03, 0.85, 0.95]); plt.savefig(plot_path.parent / "msa_metrics_comparison.png", dpi=300, bbox_inches="tight"); plt.close()
+        ref_to_col = [i for i, b in enumerate(ref_seq) if b != '-']
+        win_results = []
+        for r in recs:
+            if r.id == ref_rec.id: continue
+            q_seq, org = str(r.seq), r.id.rsplit('_', 1)[0].replace('_', ' ')
+            for s in range(len(ref_to_col) - 299):
+                sc, ec = ref_to_col[s], ref_to_col[s + 299]
+                win_ref, win_que = ref_seq[sc:ec+1], q_seq[sc:ec+1]
+                ident = sum(1 for a, b in zip(win_ref, win_que) if a == b and a != '-') / (ec - sc + 1)
+                win_results.append({"RefPos": s + 1, "Identity": ident, "Org": org})
+        if win_results:
+            wdf = pd.DataFrame(win_results); avg_wdf = wdf.select_dtypes(include=[np.number]).groupby(wdf["RefPos"]).mean().reset_index()
+            plt.figure(figsize=(12, 6)); colors = plt.cm.tab10(np.linspace(0, 1, len(recs)-1))
+            for (org, o_df), color in zip(wdf.groupby("Org"), colors): plt.plot(o_df["RefPos"], o_df["Identity"]*100, color=color, alpha=0.3, lw=1, label=org)
+            plt.plot(avg_wdf["RefPos"], avg_wdf["Identity"]*100, label="Average Identity", color="red", lw=2, linestyle="--")
+            plt.title(f"MSA Windowed Identity: {title}"); plt.xlabel("Ref Position"); plt.ylabel("% Identity"); plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small'); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(plot_path.parent / "msa_windowed_identity.png", dpi=300, bbox_inches="tight"); plt.close()
         ic_df = calculate_information_content(aln_file, reference_id)
         if not ic_df.empty:
-            ic_df.to_csv(ic_csv, index=False); plt.figure(figsize=(15, 5))
-            plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4); plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
-            plt.ylim(0, 2.1); ref_name = reference_id.rsplit('_', 1)[0].replace('_', ' ') if reference_id else ""
-            plt.xlabel(f"Alignment Position{' (Ref: ' + ref_name + ')' if ref_name else ''}"); plt.ylabel("Information Content (bits)"); plt.title(f"Information Content: {title}")
-            plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(rect=[0, 0.03, 1, 0.90]); plt.savefig(ic_plot, dpi=300); plt.close()
+            ic_df.to_csv(ic_csv, index=False); plt.figure(figsize=(15, 5)); plt.fill_between(ic_df["Position"], ic_df["IC"], color="skyblue", alpha=0.4); plt.plot(ic_df["Position"], ic_df["IC"], color="Slateblue", alpha=0.6)
+            plt.ylim(0, 2.1); ref_name = reference_id.rsplit('_', 1)[0].replace('_', ' ') if reference_id else ""; plt.xlabel(f"Alignment Position{' (Ref: ' + ref_name + ')' if ref_name else ''}"); plt.ylabel("Information Content (bits)"); plt.title(f"Information Content: {title}"); plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(rect=[0, 0.03, 1, 0.90]); plt.savefig(ic_plot, dpi=300); plt.close()
     except Exception as e: print(f"Error: {e}"); sys.exit(1)
 
 def main(): app()
