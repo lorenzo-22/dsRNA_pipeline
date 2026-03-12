@@ -423,19 +423,37 @@ def internal_accessibility_run(fasta_file: Path, ref_tmp: Path, pw_dir: Path, ac
         full_win_df = pd.concat(window_data)
         avg_df = full_win_df.groupby("RefPos").mean().reset_index()
         avg_df.to_csv(acc_dir / "data" / "windowed_analysis.csv", index=False)
-        plt.figure(figsize=(12, 6)); colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
-        for i, (df, color) in enumerate(zip(window_data, colors)):
-            label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
-            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.3, lw=1, label=label)
+        
+        # 1. Ref vs Average NTO Plot
+        plt.figure(figsize=(12, 6))
         ref_win_acc = [np.mean(ref_acc[idx:idx+300]) for idx in range(len(ref_acc)-299)]
         plt.plot(range(1, len(ref_win_acc)+1), ref_win_acc, label=f"Ref ({reference_organism})", color="black", lw=2.5)
         plt.plot(avg_df["RefPos"], avg_df["NTO_Acc"], label="Average NTOs", color="red", lw=2, linestyle="--")
-        plt.title(f"Windowed Accessibility (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small'); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "windowed_accessibility.png", dpi=300, bbox_inches="tight"); plt.close()
-        plt.figure(figsize=(12, 5)); plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
+        plt.title(f"Windowed Accessibility (Ref vs Avg NTO): {gene_name}")
+        plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(alpha=0.3); plt.tight_layout()
+        plt.savefig(acc_dir / "plots" / "ref_vs_avg_accessibility.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 2. All NTOs Plot
+        plt.figure(figsize=(12, 6))
+        colors = plt.cm.tab10(np.linspace(0, 1, len(window_data)))
+        for i, (df, color) in enumerate(zip(window_data, colors)):
+            label = df.get("Organism", ["Other Organisms"])[0] if "Organism" in df.columns else "Other Organisms"
+            plt.plot(df["RefPos"], df["NTO_Acc"], color=color, alpha=0.6, lw=1, label=label)
+        plt.title(f"Windowed Accessibility (All NTOs): {gene_name}")
+        plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Probability Unpaired")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small'); plt.grid(alpha=0.3); plt.tight_layout()
+        plt.savefig(acc_dir / "plots" / "all_ntos_accessibility.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 3. Conservation Plot (Identity and IC)
+        plt.figure(figsize=(12, 5))
+        plt.plot(avg_df["RefPos"], avg_df["Identity"]*100, label="% Identity", color="blue")
         plt.plot(avg_df["RefPos"], avg_df["IC"]*50, label="IC (bits * 50)", color="green", alpha=0.6)
         plt.title(f"Windowed Conservation (300nt): {gene_name}"); plt.xlabel("Reference Nucleotide Position"); plt.ylabel("Score")
-        plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.savefig(acc_dir / "plots" / "windowed_conservation.png", dpi=300); plt.close()
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(alpha=0.3); plt.tight_layout()
+        plt.savefig(acc_dir / "plots" / "windowed_conservation.png", dpi=300, bbox_inches="tight"); plt.close()
 
 
 @app.command(hidden=True)
