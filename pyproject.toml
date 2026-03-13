@@ -19,10 +19,11 @@ dependencies = [
     "seaborn",
     "tqdm",
     "typer",
+    "viennarna>=2.7.2",
 ]
 
 [project.scripts]
-dsrna-pipeline = "dsrna_worst_case_pipeline_v2.orthodb_fetch_cds:main"
+dsrna-pipeline = "dsrna_worst_case_pipeline_v2.main:app"
 
 [tool.uv]
 package = true

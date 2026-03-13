@@ -1,6 +1,7 @@
-def main():
-    print("Hello from dsrna-worst-case-pipeline-v2!")
+from dsrna_worst_case_pipeline_v2.main import app
 
+def main():
+    app()
 
 if __name__ == "__main__":
     main()
