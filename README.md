@@ -1,6 +1,6 @@
 # dsRNA Worst-Case Off-Target Pipeline (v2)
 
-[![Bioinformatics](https://img.shields.io/badge/Bioinformatics-Pipeline-blue.svg)](https://github.com/rth-ensafe/dsrna-worst-case-pipeline)
+[![Bioinformatics](https://img.shields.io/badge/Bioinformatics-Pipeline-blue.svg)](https://github.com/lorenzo-22/dsRNA_pipeline)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -26,8 +26,8 @@ The pipeline identifies regions in a target gene that are most likely to elicit 
 
 ### Step 1: Clone the Repository
 ```bash
-git clone https://github.com/rth-ensafe/dsrna-worst-case-pipeline.git
-cd dsrna-worst-case-pipeline
+git clone https://github.com/lorenzo-22/dsRNA_pipeline.git
+cd dsRNA_pipeline
 ```
 
 ### Step 2: Install Dependencies
