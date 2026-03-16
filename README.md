@@ -37,8 +37,12 @@ We recommend using `uv` for lightning-fast installation, but `pip` also works:
 # Using uv (recommended)
 uv sync
 
-# OR using pip
-pip install -e .
+# Activate the virtual environment
+source .venv/bin/activate       # bash/zsh
+source .venv/bin/activate.fish  # fish
+source .venv/bin/activate.csh   # csh
+
+# Now the 'dsrna-pipeline' command is available directly
 ```
 
 ### Step 3: External Tools
@@ -52,36 +56,36 @@ Ensure the following tools are available in your `$PATH` or loaded via modules:
 
 ## 📖 Usage
 
-The pipeline is designed to be run in five primary steps. Each step can be executed individually or as part of a batch.
+After activating the environment, use the `dsrna-pipeline` command to run the steps.
 
 ### 1. Download Orthologs
 Provide a list of gene descriptions and IDs to fetch CDS sequences from OrthoDB.
 ```bash
-python3 main.py fetch-cds -i input/gene_ids.txt -o output/orthologs -t 6656
+dsrna-pipeline fetch-cds -i input/gene_ids.txt -o output/orthologs -t 6656
 ```
 
 ### 2. Alignment (MSA & Pairwise)
 Generate multiple sequence alignments and pairwise comparisons to the reference species.
 ```bash
-python3 main.py align run-msa --reference "Phaedon cochleariae"
+dsrna-pipeline align run-msa --reference "Phaedon cochleariae"
 ```
 
 ### 3. K-mer Matching (Bowtie2)
 Analyze 21-mer conservation across NTOs to find potential off-target seeds.
 ```bash
-python3 main.py bowtie run-all --reference "Phaedon cochleariae"
+dsrna-pipeline bowtie run-all --reference "Phaedon cochleariae"
 ```
 
 ### 4. RNA Accessibility
 Calculate the probability of nucleotides being unpaired using ViennaRNA.
 ```bash
-python3 main.py accessibility run-all --reference "Phaedon cochleariae"
+dsrna-pipeline accessibility run-all --reference "Phaedon cochleariae"
 ```
 
 ### 5. Aggregate & Identify Worst-Case
 The final step aggregates all metrics and identifies the **Top 10 Worst-Case Windows** (highest risk).
 ```bash
-python3 main.py aggregate run-all --reference "Phaedon cochleariae"
+dsrna-pipeline aggregate run-all --reference "Phaedon cochleariae"
 ```
 
 ---
