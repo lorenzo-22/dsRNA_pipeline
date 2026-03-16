@@ -61,31 +61,31 @@ After activating the environment, use the `dsrna-pipeline` command to run the st
 ### 1. Download Orthologs
 Provide a list of gene descriptions and IDs to fetch CDS sequences from OrthoDB.
 ```bash
-dsrna-pipeline fetch-cds -i input/gene_ids.txt -o output/orthologs -t 6656
+dsrna-pipeline fetch -i input/gene_ids.txt -o output/orthologs -t 6656
 ```
 
 ### 2. Alignment (MSA & Pairwise)
 Generate multiple sequence alignments and pairwise comparisons to the reference species.
 ```bash
-dsrna-pipeline align run-msa --reference "Phaedon cochleariae"
+dsrna-pipeline align --reference "Phaedon cochleariae"
 ```
 
 ### 3. K-mer Matching (Bowtie2)
 Analyze 21-mer conservation across NTOs to find potential off-target seeds.
 ```bash
-dsrna-pipeline bowtie run-all --reference "Phaedon cochleariae"
+dsrna-pipeline bowtie --reference "Phaedon cochleariae"
 ```
 
 ### 4. RNA Accessibility
 Calculate the probability of nucleotides being unpaired using ViennaRNA.
 ```bash
-dsrna-pipeline accessibility run-all --reference "Phaedon cochleariae"
+dsrna-pipeline accessibility --reference "Phaedon cochleariae"
 ```
 
 ### 5. Aggregate & Identify Worst-Case
 The final step aggregates all metrics and identifies the **Top 10 Worst-Case Windows** (highest risk).
 ```bash
-dsrna-pipeline aggregate run-all --reference "Phaedon cochleariae"
+dsrna-pipeline aggregate --reference "Phaedon cochleariae"
 ```
 
 ---
