@@ -122,5 +122,5 @@ output/
 ## ✉️ Contact & Support
 
 **Author:** Lorenzo Favaro  
-**Lab:** RNA Therapeutics and Hygiene (RTH), University of Copenhagen  
+**Lab:** Center for non-coding RNA in Technology and Health (RTH), University of Copenhagen  
 **License:** MIT
