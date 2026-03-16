@@ -58,6 +58,17 @@ Ensure the following tools are available in your `$PATH` or loaded via modules:
 
 After activating the environment, use the `dsrna-pipeline` command to run the steps.
 
+### 🚀 Running the Full Pipeline
+The `run-all` command executes steps 1 through 4 in sequence. **Note:** It does *not* include the final `aggregate` step, which should be run manually after all previous jobs (including Slurm tasks) have completed.
+
+```bash
+dsrna-pipeline run-all -i input/gene_ids.txt --reference "Phaedon cochleariae"
+```
+
+---
+
+### 🔍 Individual Steps
+
 ### 1. Download Orthologs
 Provide a list of gene descriptions and IDs to fetch CDS sequences from OrthoDB.
 ```bash
@@ -67,25 +78,25 @@ dsrna-pipeline fetch -i input/gene_ids.txt -o output/orthologs -t 6656
 ### 2. Alignment (MSA & Pairwise)
 Generate multiple sequence alignments and pairwise comparisons to the reference species.
 ```bash
-dsrna-pipeline align --reference "Phaedon cochleariae"
+dsrna-pipeline align -i input/gene_ids.txt --reference "Phaedon cochleariae"
 ```
 
 ### 3. K-mer Matching (Bowtie2)
 Analyze 21-mer conservation across NTOs to find potential off-target seeds.
 ```bash
-dsrna-pipeline bowtie --reference "Phaedon cochleariae"
+dsrna-pipeline bowtie -i input/gene_ids.txt --reference "Phaedon cochleariae"
 ```
 
 ### 4. RNA Accessibility
 Calculate the probability of nucleotides being unpaired using ViennaRNA.
 ```bash
-dsrna-pipeline accessibility --reference "Phaedon cochleariae"
+dsrna-pipeline accessibility -i input/gene_ids.txt --reference "Phaedon cochleariae"
 ```
 
 ### 5. Aggregate & Identify Worst-Case
-The final step aggregates all metrics and identifies the **Top 10 Worst-Case Windows** (highest risk).
+The final step aggregates all metrics and identifies the **Top 10 Worst-Case Windows** (highest risk). Run this *after* the steps above are finished.
 ```bash
-dsrna-pipeline aggregate --reference "Phaedon cochleariae"
+dsrna-pipeline aggregate -i input/gene_ids.txt --reference "Phaedon cochleariae"
 ```
 
 ---
