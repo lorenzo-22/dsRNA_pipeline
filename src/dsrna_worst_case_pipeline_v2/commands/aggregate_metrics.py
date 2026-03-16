@@ -124,9 +124,9 @@ def aggregate(
         plt.tight_layout()
         plt.savefig(agg_dir / "pipeline_summary_metrics.png", dpi=300); plt.close()
         
-        # Top 10
-        best_windows = final_df.sort_values(by=["Bowtie_Hits_0mm", "Bowtie_Hits_1mm", "Avg_Pairwise_Identity", "Avg_NTO_Accessibility"], ascending=[True, True, True, False]).head(10)
-        best_windows.to_csv(agg_dir / "top_10_best_windows.csv", index=False)
+        # Top 10 - Worst Case
+        worst_case_windows = final_df.sort_values(by=["Avg_Pairwise_Identity", "Avg_NTO_Accessibility", "Bowtie_Hits_0mm", "Bowtie_Hits_1mm"], ascending=[False, False, False, False]).head(10)
+        worst_case_windows.to_csv(agg_dir / "top_10_worst_case_windows.csv", index=False)
         
     logger.info("Metrics aggregation and plotting complete.")
 
