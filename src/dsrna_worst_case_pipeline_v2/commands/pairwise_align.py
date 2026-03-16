@@ -34,7 +34,7 @@ def pairwise_align(
         SeqIO.write(ref_rec, ref_tmp, "fasta")
         if slurm:
             script = g_dir / "slurm_pairwise.sh"
-            content = f"#!/bin/bash\n#SBATCH --job-name=pair_{gene[:10]}\n#SBATCH --output={g_dir}/job_pairwise.out\n#SBATCH --mem={mem}\n#SBATCH --time=01:00:00\n\nmodule load EMBOSS\n{sys.executable} {Path(__file__).resolve().parent.parent / 'main.py'} pairwise internal-pairwise-run \"{f.resolve()}\" \"{ref_tmp.resolve()}\" \"{g_dir.resolve()}\" \"{reference_organism}\" \"{gene}\"\n"
+            content = f"#!/bin/bash\n#SBATCH --job-name=pair_{gene[:10]}\n#SBATCH --output={g_dir}/job_pairwise.out\n#SBATCH --mem={mem}\n#SBATCH --time=01:00:00\n\nmodule load EMBOSS\ndsrna-pipeline internal-pairwise-run \"{f.resolve()}\" \"{ref_tmp.resolve()}\" \"{g_dir.resolve()}\" \"{reference_organism}\" \"{gene}\"\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:

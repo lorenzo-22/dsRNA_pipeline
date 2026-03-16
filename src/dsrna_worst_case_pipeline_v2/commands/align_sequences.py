@@ -50,7 +50,7 @@ def align_sequences(
         if slurm:
             script = g_dir / "slurm" / f"msa_{f.stem}.sh"
             ref_arg = f'--reference-id "{ref_id}"' if ref_id else ""
-            content = f"#!/bin/bash\n#SBATCH --job-name=msa_{gene[:10]}\n#SBATCH --output={g_dir}/slurm/job.out\n#SBATCH --cpus-per-task=4\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\nmodule load clustal-omega\nclustalo -i {temp_in.resolve()} -o {aln.resolve()} --force --outfmt=fasta --threads=4\n{sys.executable} {Path(__file__).resolve().parent.parent / 'main.py'} align internal-msa-plot {aln.resolve()} {plot.resolve()} {ic_p.resolve()} {ic_c.resolve()} \"{gene}\" {ref_arg}\n"
+            content = f"#!/bin/bash\n#SBATCH --job-name=msa_{gene[:10]}\n#SBATCH --output={g_dir}/slurm/job.out\n#SBATCH --cpus-per-task=4\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\nmodule load clustal-omega\nclustalo -i {temp_in.resolve()} -o {aln.resolve()} --force --outfmt=fasta --threads=4\ndsrna-pipeline internal-msa-plot {aln.resolve()} {plot.resolve()} {ic_p.resolve()} {ic_c.resolve()} \"{gene}\" {ref_arg}\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:

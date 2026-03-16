@@ -13,34 +13,20 @@ app = typer.Typer(help="dsRNA Worst Case Pipeline v2")
 # High-level command
 app.command(name="run-all")(run_all)
 
-# Individual step commands
+# Main Step Commands
 app.command(name="fetch")(fetch_cds)
 app.command(name="plot-lengths")(plot_lengths)
+app.command(name="align")(align_sequences)
+app.command(name="pairwise")(pairwise_align)
+app.command(name="accessibility")(calculate_accessibility)
+app.command(name="bowtie")(bowtie_match)
 app.command(name="aggregate")(aggregate)
 
-# Alignment related
-align_app = typer.Typer(help="Perform MSA")
-align_app.command(name="run")(align_sequences)
-align_app.command(name="internal-msa-plot", hidden=True)(internal_msa_plot)
-app.add_typer(align_app, name="align")
-
-# Pairwise related
-pairwise_app = typer.Typer(help="Perform Pairwise Alignment")
-pairwise_app.command(name="run")(pairwise_align)
-pairwise_app.command(name="internal-pairwise-run", hidden=True)(internal_pairwise_run)
-app.add_typer(pairwise_app, name="pairwise")
-
-# Accessibility related
-acc_app = typer.Typer(help="Calculate Accessibility")
-acc_app.command(name="run")(calculate_accessibility)
-acc_app.command(name="internal-accessibility-run", hidden=True)(internal_accessibility_run)
-app.add_typer(acc_app, name="accessibility")
-
-# Bowtie related
-bowtie_app = typer.Typer(help="Find 21-mer matches using Bowtie")
-bowtie_app.command(name="run")(bowtie_match)
-bowtie_app.command(name="internal-bowtie-run", hidden=True)(internal_bowtie_run)
-app.add_typer(bowtie_app, name="bowtie")
+# Hidden internal commands (used for SLURM/background tasks)
+app.command(name="internal-msa-plot", hidden=True)(internal_msa_plot)
+app.command(name="internal-pairwise-run", hidden=True)(internal_pairwise_run)
+app.command(name="internal-accessibility-run", hidden=True)(internal_accessibility_run)
+app.command(name="internal-bowtie-run", hidden=True)(internal_bowtie_run)
 
 if __name__ == "__main__":
     app()

@@ -28,7 +28,7 @@ def calculate_accessibility(
         if not ref_tmp.exists(): continue
         if slurm:
             script = acc_dir / "slurm_acc.sh"
-            content = f"#!/bin/bash\n#SBATCH --job-name=acc_{gene[:10]}\n#SBATCH --output={acc_dir}/job_acc.out\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\n{sys.executable} {Path(__file__).resolve().parent.parent / 'main.py'} accessibility internal-accessibility-run \"{f.resolve()}\" \"{ref_tmp.resolve()}\" \"{pw_dir.resolve()}\" \"{acc_dir.resolve()}\" \"{reference_organism}\" \"{gene}\"\n"
+            content = f"#!/bin/bash\n#SBATCH --job-name=acc_{gene[:10]}\n#SBATCH --output={acc_dir}/job_acc.out\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\ndsrna-pipeline internal-accessibility-run \"{f.resolve()}\" \"{ref_tmp.resolve()}\" \"{pw_dir.resolve()}\" \"{acc_dir.resolve()}\" \"{reference_organism}\" \"{gene}\"\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:

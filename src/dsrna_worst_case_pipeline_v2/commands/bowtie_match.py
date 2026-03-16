@@ -57,7 +57,7 @@ def bowtie_match(
         
         if slurm:
             script = bt_dir / "slurm_bowtie.sh"
-            content = f"#!/bin/bash\n#SBATCH --job-name=bt_{gene[:10]}\n#SBATCH --output={bt_dir}/job_bowtie.out\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\nmodule load bowtie\n{sys.executable} {Path(__file__).resolve().parent.parent / 'main.py'} bowtie internal-bowtie-run \"{kmers_file.resolve()}\" \"{nto_file.resolve()}\" \"{bt_dir.resolve()}\" \"{gene}\" \"{reference_organism}\"\n"
+            content = f"#!/bin/bash\n#SBATCH --job-name=bt_{gene[:10]}\n#SBATCH --output={bt_dir}/job_bowtie.out\n#SBATCH --mem={mem}\n#SBATCH --time=02:00:00\n\nmodule load bowtie\ndsrna-pipeline internal-bowtie-run \"{kmers_file.resolve()}\" \"{nto_file.resolve()}\" \"{bt_dir.resolve()}\" \"{gene}\" \"{reference_organism}\"\n"
             script.write_text(content)
             subprocess.run(["sbatch", str(script)], check=True)
         else:
