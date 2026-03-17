@@ -5,10 +5,10 @@ from loguru import logger
 
 from dsrna_worst_case_pipeline_v2.commands.fetch_cds import fetch_cds, DEFAULT_TAXON
 from dsrna_worst_case_pipeline_v2.commands.plot_lengths import plot_lengths
-from dsrna_worst_case_pipeline_v2.commands.align_sequences import align_sequences
-from dsrna_worst_case_pipeline_v2.commands.pairwise_align import pairwise_align
-from dsrna_worst_case_pipeline_v2.commands.calculate_accessibility import calculate_accessibility
-from dsrna_worst_case_pipeline_v2.commands.bowtie_match import bowtie_match
+from dsrna_worst_case_pipeline_v2.commands.align_sequences import align
+from dsrna_worst_case_pipeline_v2.commands.pairwise_align import pairwise
+from dsrna_worst_case_pipeline_v2.commands.calculate_accessibility import accessibility
+from dsrna_worst_case_pipeline_v2.commands.bowtie_match import bowtie
 
 def run_all(
     input_file: Path = typer.Option(Path("input/gene_ids.txt"), "--input", "-i", help="Path to gene IDs file"),
@@ -38,15 +38,15 @@ def run_all(
     plot_lengths(fasta_dir, output_dir, reference_organism)
 
     logger.info("Step 3/6: Performing Multiple Sequence Alignment (MSA)...")
-    align_sequences(fasta_dir, output_dir, reference_organism, slurm, mem)
+    align(fasta_dir, output_dir, reference_organism, input_file, slurm, mem)
 
     logger.info("Step 4/6: Finding 21-mer matches with Bowtie...")
-    bowtie_match(fasta_dir, output_dir, reference_organism, slurm, mem)
+    bowtie(fasta_dir, output_dir, reference_organism, input_file, slurm, mem)
 
     logger.info("Step 5/6: Performing Pairwise Alignments...")
-    pairwise_align(fasta_dir, output_dir, reference_organism, slurm, mem)
+    pairwise(fasta_dir, output_dir, reference_organism, input_file, slurm, mem)
 
     logger.info("Step 6/6: Calculating Accessibility and windowed identity...")
-    calculate_accessibility(fasta_dir, output_dir, reference_organism, slurm, mem)
+    accessibility(fasta_dir, output_dir, reference_organism, input_file, slurm, mem)
 
     logger.info("Pipeline execution finished. Run 'aggregate' separately after jobs complete.")

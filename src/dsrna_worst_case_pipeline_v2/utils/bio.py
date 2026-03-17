@@ -116,3 +116,47 @@ def add_labels_to_barplot(ax):
                         xytext = (0, 9), 
                         textcoords = 'offset points',
                         fontsize=8)
+
+def parse_gene_ids(file_path: Path) -> List[Dict]:
+    """
+    Parse gene_ids.txt with format: <ID>,<Description>[,<Window_Sizes>]
+    Window_Sizes can be a single number (300) or range (300-490).
+    Default window size is 300 if not specified.
+    """
+    genes = []
+    if not file_path.exists():
+        return genes
+    
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) < 2:
+                continue
+            
+            gene_id = parts[0]
+            description = parts[1]
+            windows = [300]
+            
+            if len(parts) >= 3:
+                win_str = parts[2]
+                if '-' in win_str:
+                    try:
+                        w_parts = win_str.split('-')
+                        windows = [int(p.strip()) for p in w_parts]
+                    except ValueError:
+                        windows = [300]
+                else:
+                    try:
+                        windows = [int(win_str)]
+                    except ValueError:
+                        windows = [300]
+            
+            genes.append({
+                "id": gene_id,
+                "description": description,
+                "windows": windows
+            })
+    return genes

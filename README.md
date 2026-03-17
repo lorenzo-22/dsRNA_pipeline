@@ -54,12 +54,27 @@ Ensure the following tools are available in your `$PATH` or loaded via modules:
 
 ---
 
+### 1. Configure Gene IDs
+Update `input/gene_ids.txt` with your target genes. The format supports specifying multiple window sizes:
+Format: `<Any_ID>,<Gene_Description>,<Window_Size_1>[-<Window_Size_2>...]`
+
+Example:
+```
+TC015612,Acetyl-CoA carboxylase,300
+TC000144,Proteasome subunit alpha type-6,300-490
+```
+- For the first gene, it will run analysis with a 300bp window.
+- For the second gene, it will run analysis for both 300bp and 490bp windows.
+- If no window size is specified, it defaults to 300bp.
+
+---
+
 ## 📖 Usage
 
 After activating the environment, use the `dsrna-pipeline` command to run the steps.
 
 ### 🚀 Running the Full Pipeline
-The `run-all` command executes steps 1 through 4 in sequence. **Note:** It does *not* include the final `aggregate` step, which should be run manually after all previous jobs (including Slurm tasks) have completed.
+The `run-all` command executes steps 1 through 6 in sequence for all specified window sizes. **Note:** It does *not* include the final `aggregate` step.
 
 ```bash
 dsrna-pipeline run-all -i input/gene_ids.txt --reference "Phaedon cochleariae"
@@ -67,36 +82,27 @@ dsrna-pipeline run-all -i input/gene_ids.txt --reference "Phaedon cochleariae"
 
 ---
 
-### 🔍 Individual Steps
+## 📂 Reorganized Output Structure
 
-### 1. Download Orthologs
-Provide a list of gene descriptions and IDs to fetch CDS sequences from OrthoDB.
-```bash
-dsrna-pipeline fetch -i input/gene_ids.txt -o output/orthologs -t 6656
+The pipeline now organizes results by window size to allow multi-scale analysis:
+
 ```
-
-### 2. Alignment (MSA & Pairwise)
-Generate multiple sequence alignments and pairwise comparisons to the reference species.
-```bash
-dsrna-pipeline align -i input/gene_ids.txt --reference "Phaedon cochleariae"
-```
-
-### 3. K-mer Matching (Bowtie2)
-Analyze 21-mer conservation across NTOs to find potential off-target seeds.
-```bash
-dsrna-pipeline bowtie -i input/gene_ids.txt --reference "Phaedon cochleariae"
-```
-
-### 4. RNA Accessibility
-Calculate the probability of nucleotides being unpaired using ViennaRNA.
-```bash
-dsrna-pipeline accessibility -i input/gene_ids.txt --reference "Phaedon cochleariae"
-```
-
-### 5. Aggregate & Identify Worst-Case
-The final step aggregates all metrics and identifies the **Top 10 Worst-Case Windows** (highest risk). Run this *after* the steps above are finished.
-```bash
-dsrna-pipeline aggregate -i input/gene_ids.txt --reference "Phaedon cochleariae"
+output/
+└── Organisms/
+    └── Phaedon_cochleariae/
+        └── <Gene_Name>/
+            ├── alignments/
+            │   ├── msa/          # Base MSA files (window independent)
+            │   └── pairwise/     # Base pairwise files (window independent)
+            └── <Window_Size>/    # (e.g., 300, 490)
+                ├── similarity/
+                │   ├── msa/      # % Identity plots for this window
+                │   └── pairwise/ # % Identity plots for this window
+                ├── accessibility/
+                ├── bowtie_matches/
+                └── summary/
+                    ├── pipeline_summary_metrics.png
+                    └── top_10_worst_case_windows.csv
 ```
 
 ---

@@ -32,7 +32,16 @@ def fetch_cds(
     target_species.add(reference_organism)
     
     lines = input_file.read_text().splitlines()
-    df_genes = pd.DataFrame([([s.strip() for s in l.split(",", 1)] if "," in l else [l.strip(), l.strip()]) for l in lines if l.strip()], columns=["gene_id", "gene_name"])
+    rows = []
+    for l in lines:
+        l = l.strip()
+        if not l or l.startswith('#'): continue
+        parts = [p.strip() for p in l.split(',')]
+        if len(parts) >= 2:
+            rows.append({"gene_id": parts[0], "gene_name": parts[1]})
+        elif len(parts) == 1:
+            rows.append({"gene_id": parts[0], "gene_name": parts[0]})
+    df_genes = pd.DataFrame(rows)
     
     logger.info(f"Processing {len(df_genes)} genes for {reference_organism}...")
     for _, row in tqdm(df_genes.iterrows(), total=len(df_genes), desc="Fetching"):
